@@ -3,11 +3,13 @@ package constants
 type CmdName string
 
 const (
-	CmdPing      CmdName = "PING"
-	CmdGet       CmdName = "GET"
-	CmdSet       CmdName = "SET"
-	CmdDel       CmdName = "DEL"
-	CmdExpire    CmdName = "EXPIRE"
-	CmdSubscribe CmdName = "SUBSCRIBE"
-	CmdPublish   CmdName = "PUBLISH"
+	Ping      CmdName = "PING"
+	Get       CmdName = "GET"
+	Set       CmdName = "SET"
+	Del       CmdName = "DEL"
+	TTL       CmdName = "TTL"
+	Expire    CmdName = "EXPIRE"
+	EVICT     CmdName = "_EVICT"
+	Subscribe CmdName = "SUBSCRIBE"
+	Publish   CmdName = "PUBLISH"
 )

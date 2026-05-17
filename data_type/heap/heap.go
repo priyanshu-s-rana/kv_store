@@ -22,6 +22,17 @@ func (h *Heap[T]) Push(ele T) {
 	h.shiftUp()
 }
 
+// Peaking the top element
+// O(1) complexity
+func (h *Heap[T]) Peek() (T, bool) {
+	if len(h.data) > 0 {
+		return h.data[0], true
+	}
+
+	var zero T
+	return zero, false
+}
+
 // Poping an element from the heap
 // O(log n) complexity
 func (h *Heap[T]) Pop() (T, bool) {
