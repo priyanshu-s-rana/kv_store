@@ -4,6 +4,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/priyanshu-s-rana/kv_store/constants"
 	"github.com/priyanshu-s-rana/kv_store/data_type/heap"
 	"github.com/priyanshu-s-rana/kv_store/models"
 )
@@ -16,6 +17,19 @@ type (
 type entry struct {
 	value  []byte
 	expiry time.Time
+}
+
+// Check if the entry is expired based on the current time and the expiry time
+func (e *entry) isExpired() bool {
+	if e.expiry.IsZero() {
+		return false
+	}
+	return time.Now().After(e.expiry)
+}
+
+// Check if the entry has an expiry time set
+func (e *entry) hasExpiry() bool {
+	return !e.expiry.IsZero()
 }
 
 type ttlItem struct {
@@ -55,7 +69,25 @@ func (store *Store) eventLoop() {
 	for cmd := range store.cmdChan {
 		var resp Response
 		switch cmd.Name {
-
+		case constants.Ping:
+			resp = store.ping()
+		case constants.Set:
+			resp = store.set(cmd.Args)
+		case constants.Get:
+			resp = store.get(cmd.Args)
+		case constants.Del:
+			resp = store.del(cmd.Args)
+		case constants.TTL:
+			resp = store.ttl(cmd.Args)
+		case constants.Expire:
+			resp = store.expire(cmd.Args)
+		case constants.Publish:
+			resp = store.publish(cmd.Args)
+		case "_EVICT":
+			store.evict()
+			continue
+		default:
+			resp = store._default(cmd)
 		}
 
 		select {

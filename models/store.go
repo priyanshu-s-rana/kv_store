@@ -10,7 +10,15 @@ type Command struct {
 	Resp chan Response
 }
 
+func NewCommand(name constants.CmdName, args []string) Command {
+	return Command{
+		Name: name,
+		Args: args,
+		Resp: make(chan Response, 1),
+	}
+}
+
 type Response struct {
-	Value []string
+	Value []byte
 	Err   error
 }

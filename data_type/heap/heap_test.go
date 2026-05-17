@@ -26,6 +26,103 @@ func TestMakeHeap(t *testing.T) {
 	}
 }
 
+func TestPeekEmpty(t *testing.T) {
+	h := minIntHeap()
+	v, ok := h.Peek()
+	if ok {
+		t.Errorf("Peek on empty returned ok=true, value=%v", v)
+	}
+	if v != 0 {
+		t.Errorf("Peek on empty returned value=%d, want zero value 0", v)
+	}
+	if h.Len() != 0 {
+		t.Errorf("Peek mutated len, got %d, want 0", h.Len())
+	}
+}
+
+func TestPeekDoesNotMutate(t *testing.T) {
+	h := minIntHeap()
+	h.Push(3)
+	h.Push(1)
+	h.Push(2)
+
+	before := h.Len()
+	v1, ok1 := h.Peek()
+	v2, ok2 := h.Peek()
+	after := h.Len()
+
+	if !ok1 || !ok2 {
+		t.Errorf("Peek returned ok=false on non-empty heap")
+	}
+	if v1 != 1 || v2 != 1 {
+		t.Errorf("Peek = (%d, %d), want both 1 (min)", v1, v2)
+	}
+	if before != after {
+		t.Errorf("Peek mutated len: before=%d after=%d", before, after)
+	}
+}
+
+func TestPeekMinHeap(t *testing.T) {
+	h := minIntHeap()
+	for _, v := range []int{5, 3, 8, 1, 9} {
+		h.Push(v)
+	}
+
+	v, ok := h.Peek()
+	if !ok || v != 1 {
+		t.Errorf("Peek = (%d, %v), want (1, true)", v, ok)
+	}
+}
+
+func TestPeekMaxHeap(t *testing.T) {
+	h := maxIntHeap()
+	for _, v := range []int{5, 3, 8, 1, 9} {
+		h.Push(v)
+	}
+
+	v, ok := h.Peek()
+	if !ok || v != 9 {
+		t.Errorf("Peek = (%d, %v), want (9, true)", v, ok)
+	}
+}
+
+func TestPeekAfterPop(t *testing.T) {
+	h := minIntHeap()
+	for _, v := range []int{5, 3, 8, 1, 9} {
+		h.Push(v)
+	}
+
+	h.Pop() // remove 1
+
+	v, ok := h.Peek()
+	if !ok || v != 3 {
+		t.Errorf("Peek after pop = (%d, %v), want (3, true)", v, ok)
+	}
+}
+
+func TestPeekStruct(t *testing.T) {
+	type Task struct {
+		Name     string
+		Priority int
+	}
+
+	h := New[Task](func(a, b Task) bool { return a.Priority < b.Priority })
+	h.Push(Task{"low", 10})
+	h.Push(Task{"urgent", 1})
+	h.Push(Task{"medium", 5})
+
+	v, ok := h.Peek()
+	if !ok || v.Name != "urgent" || v.Priority != 1 {
+		t.Errorf("Peek = %+v, want urgent task with priority 1", v)
+	}
+
+	// Peek again to confirm idempotent
+	v2, _ := h.Peek()
+	if v2.Name != "urgent" {
+		t.Errorf("Second Peek = %+v, want same urgent task", v2)
+	}
+}
+
 func TestPopEmpty(t *testing.T) {
 	h := minIntHeap()
 	v, ok := h.Pop()
