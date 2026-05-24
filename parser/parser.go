@@ -1,0 +1,136 @@
+package parser
+
+import (
+	"bufio"
+	"fmt"
+	"io"
+	"strconv"
+	"strings"
+
+	"github.com/priyanshu-s-rana/kv_store/constants"
+)
+
+type Command struct {
+	Name string
+	Args []string
+}
+
+type Parser struct {
+	reader *bufio.Reader
+}
+
+// New creates a Parser that reads commands from r.
+// @returns *Parser: wraps r in a bufio.Reader internally.
+func New(r io.Reader) *Parser {
+	return &Parser{
+		reader: bufio.NewReader(r),
+	}
+}
+
+// ReadCommand parses the next command from the stream.
+// Auto-detects the wire format from the first byte:
+// - '*' starts a RESP array of bulk strings.
+// - Anything else is treated as an inline whitespace-separated line.
+// @returns *Command: the parsed command with uppercased Name and raw Args.
+// @returns io.EOF: when the stream is exhausted cleanly.
+// @returns error: on malformed input, bad length, or truncated bulk string.
+func (p *Parser) ReadCommand() (*Command, error) {
+	line, err := p.readLine()
+	if err != nil {
+		return nil, err
+	}
+
+	if len(line) == 0 || line[0] != '*' {
+		return p.parseLine(line)
+	}
+
+	arr_length, err := strconv.Atoi(line[1:])
+	if err != nil {
+		return nil, fmt.Errorf(constants.INV_ARRAY_LEN, line)
+	}
+
+	if arr_length <= 0 {
+		return nil, fmt.Errorf(constants.INV_CMD_ARRAY_LEN, arr_length)
+	}
+
+	parts := make([]string, 0, arr_length)
+	for range arr_length {
+		cmd_string, err := p.readBulkString()
+		if err != nil {
+			return nil, err
+		}
+		parts = append(parts, cmd_string)
+	}
+
+	if len(parts) == 0 {
+		return nil, fmt.Errorf(constants.EMPTY_CMD)
+	}
+
+	return &Command{
+		Name: strings.ToUpper(parts[0]),
+		Args: parts[1:],
+	}, nil
+}
+
+// readLine reads one '\n'-terminated line from the buffered reader.
+// @returns string: line content with trailing "\r\n" or "\n" stripped.
+// @returns io.EOF: if the stream closes before a newline is seen.
+func (p *Parser) readLine() (string, error) {
+	line, err := p.reader.ReadString('\n')
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimRight(line, "\r\n"), nil
+}
+
+// parseLine parses an inline-format command from a single line.
+// Splits on whitespace (collapsing runs) and uppercases the verb.
+// @returns *Command: Name is parts[0] uppercased, Args is the rest.
+// @returns error: if the line contains no tokens.
+func (p *Parser) parseLine(line string) (*Command, error) {
+	parts := strings.Fields(line)
+	if len(parts) == 0 {
+		return nil, fmt.Errorf(constants.EMPTY_CMD)
+	}
+
+	return &Command{
+		Name: strings.ToUpper(parts[0]),
+		Args: parts[1:],
+	}, nil
+}
+
+// readBulkString reads one RESP bulk string: a "$<len>\r\n" header,
+// then exactly <len> bytes, then a trailing "\r\n".
+// Payload is read with io.ReadFull so it is binary-safe (CRLF and NUL
+// bytes inside the payload are preserved).
+// @returns string: the payload bytes as a string.
+// @returns "", nil: for the null bulk string "$-1".
+// @returns error: on malformed header or truncated payload.
+func (p *Parser) readBulkString() (string, error) {
+	line, err := p.readLine()
+	if err != nil {
+		return "", err
+	}
+
+	if len(line) == 0 || line[0] != '$' {
+		return "", fmt.Errorf(constants.INV_STR_PARSER, line)
+	}
+
+	// Null bulk string
+	if line == "$-1" {
+		return "", nil
+	}
+
+	length, err := strconv.Atoi(line[1:])
+	if err != nil {
+		return "", fmt.Errorf(constants.INV_STR_PARSER, line)
+	}
+
+	buf := make([]byte, length+2) // +2 for \r\n
+	_, err = io.ReadFull(p.reader, buf)
+	if err != nil {
+		return "", err
+	}
+
+	return string(buf[:length]), nil
+}
