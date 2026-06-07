@@ -12,4 +12,5 @@ const (
 	EVICT     CmdName = "_EVICT"
 	Subscribe CmdName = "SUBSCRIBE"
 	Publish   CmdName = "PUBLISH"
+	Snapshot  CmdName = "_SNAPSHOT"
 )

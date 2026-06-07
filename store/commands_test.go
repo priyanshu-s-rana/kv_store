@@ -430,7 +430,7 @@ func TestEvictSkipsStaleHeapEntry(t *testing.T) {
 	s := newTestStore()
 	now := time.Now()
 
-	staleExpiry := now.Add(-1 * time.Second)  // old, already past
+	staleExpiry := now.Add(-1 * time.Second)   // old, already past
 	currentExpiry := now.Add(10 * time.Second) // refreshed, still alive
 
 	s.data["k"] = &entry{value: []byte("v"), expiry: currentExpiry}
@@ -472,5 +472,80 @@ func TestEvictStopsAtFirstAlive(t *testing.T) {
 	}
 	if s.ttls.Len() != 1 {
 		t.Errorf("ttls len = %d, want 1", s.ttls.Len())
+	}
+}
+
+// ---- SNAPSHOT ----
+
+// Verifies snapshot copies every key's value and expiry into the response
+// map and delivers it on the snapResp channel.
+func TestSnapshotCopiesData(t *testing.T) {
+	s := newTestStore()
+	s.snapResp = make(chan SnapshotResponse, 1)
+
+	expiry := time.Now().Add(time.Hour)
+	s.data["k1"] = &entry{value: []byte("v1")}
+	s.data["k2"] = &entry{value: []byte("v2"), expiry: expiry}
+
+	s.snapshot()
+
+	resp := <-s.snapResp
+	if resp.err != nil {
+		t.Fatalf("snapshot err = %v, want nil", resp.err)
+	}
+	if len(resp.data) != 2 {
+		t.Fatalf("snapshot len = %d, want 2", len(resp.data))
+	}
+	if string(resp.data["k1"].Value) != "v1" {
+		t.Errorf("k1 value = %q, want %q", resp.data["k1"].Value, "v1")
+	}
+	if !resp.data["k1"].Expiry.IsZero() {
+		t.Errorf("k1 expiry = %v, want zero", resp.data["k1"].Expiry)
+	}
+	if string(resp.data["k2"].Value) != "v2" {
+		t.Errorf("k2 value = %q, want %q", resp.data["k2"].Value, "v2")
+	}
+	if !resp.data["k2"].Expiry.Equal(expiry) {
+		t.Errorf("k2 expiry = %v, want %v", resp.data["k2"].Expiry, expiry)
+	}
+}
+
+// Verifies snapshotting an empty store yields an empty (non-nil) map.
+func TestSnapshotEmptyStore(t *testing.T) {
+	s := newTestStore()
+	s.snapResp = make(chan SnapshotResponse, 1)
+
+	s.snapshot()
+
+	resp := <-s.snapResp
+	if resp.err != nil {
+		t.Fatalf("snapshot err = %v, want nil", resp.err)
+	}
+	if resp.data == nil {
+		t.Fatalf("snapshot data is nil, want empty map")
+	}
+	if len(resp.data) != 0 {
+		t.Errorf("snapshot len = %d, want 0", len(resp.data))
+	}
+}
+
+// Verifies the snapshot map is independent of the live store: mutating
+// s.data after the snapshot does not change the captured response.
+func TestSnapshotIsDecoupledFromStore(t *testing.T) {
+	s := newTestStore()
+	s.snapResp = make(chan SnapshotResponse, 1)
+	s.data["k"] = &entry{value: []byte("v")}
+
+	s.snapshot()
+	resp := <-s.snapResp
+
+	// Add a new key after the snapshot was taken.
+	s.data["new"] = &entry{value: []byte("late")}
+
+	if _, ok := resp.data["new"]; ok {
+		t.Errorf("snapshot captured a key added after snapshot()")
+	}
+	if len(resp.data) != 1 {
+		t.Errorf("snapshot len = %d, want 1", len(resp.data))
 	}
 }
