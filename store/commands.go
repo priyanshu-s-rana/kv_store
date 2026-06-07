@@ -6,10 +6,11 @@ import (
 	"time"
 
 	"github.com/priyanshu-s-rana/kv_store/constants"
+	"github.com/priyanshu-s-rana/kv_store/parser"
 )
 
 func (s *Store) ping() Response {
-	return Response{Value: []byte(constants.PONG)}
+	return Response{Value: parser.SimpleString(constants.PONG)}
 }
 
 // GET command retrieves the value of the specified key.
@@ -17,22 +18,21 @@ func (s *Store) ping() Response {
 // @returns  nil: if the key does not exist or is expired.
 func (s *Store) get(args []string) Response {
 	if len(args) < 1 {
-		return Response{Value: fmt.Appendf(nil, constants.WRONG_NUM_ARGS, "GET")}
+		return Response{Value: parser.Error(fmt.Sprintf(constants.WRONG_NUM_ARGS, "GET"))}
 	}
 
 	key := args[0]
 	e, ok := s.data[key]
 	if !ok {
-		return Response{Value: []byte(constants.NIL)}
+		return Response{Value: parser.NullBulkString()}
 	}
 
 	if e.isExpired() {
 		delete(s.data, key)
-		return Response{Value: []byte(constants.NIL)}
+		return Response{Value: parser.NullBulkString()}
 	}
 
-	resp := fmt.Sprintf("$%d\r\n%s\r\n", len(e.value), e.value)
-	return Response{Value: []byte(resp)}
+	return Response{Value: parser.BulkString(string(e.value))}
 }
 
 // SET command sets the value of the specified key.
@@ -43,7 +43,7 @@ func (s *Store) get(args []string) Response {
 // @returns OK: if the command is successful,
 func (s *Store) set(args []string) Response {
 	if len(args) < 2 {
-		return Response{Value: fmt.Appendf(nil, constants.WRONG_NUM_ARGS, "SET")}
+		return Response{Value: parser.Error(fmt.Sprintf(constants.WRONG_NUM_ARGS, "SET"))}
 	}
 	key, value := args[0], args[1]
 	e := entry{value: []byte(value)}
@@ -54,7 +54,7 @@ func (s *Store) set(args []string) Response {
 	}
 
 	s.data[key] = &e
-	return Response{Value: []byte(constants.OK)}
+	return Response{Value: parser.SimpleString(constants.OK)}
 }
 
 // DEL command deletes the specified key.
@@ -62,18 +62,18 @@ func (s *Store) set(args []string) Response {
 // @returns 1: if the key exists and is deleted.
 func (s *Store) del(args []string) Response {
 	if len(args) < 1 {
-		return Response{Value: fmt.Appendf(nil, constants.WRONG_NUM_ARGS, "DEL")}
+		return Response{Value: parser.Error(fmt.Sprintf(constants.WRONG_NUM_ARGS, "DEL"))}
 	}
 
 	key := args[0]
 	_, ok := s.data[key]
 	if !ok {
-		return Response{Value: []byte(constants.ZERO)}
+		return Response{Value: parser.Integer(constants.ZERO)}
 	}
 
 	delete(s.data, key)
 	s.publish([]string{"lock-released:" + key, "released"})
-	return Response{Value: []byte(constants.ONE)}
+	return Response{Value: parser.Integer(constants.ONE)}
 }
 
 // EXPIRE command sets a ttl on key
@@ -81,24 +81,24 @@ func (s *Store) del(args []string) Response {
 // @returns 1: if the ttl is set successfully.
 func (s *Store) expire(args []string) Response {
 	if len(args) < 2 {
-		return Response{Value: fmt.Appendf(nil, constants.WRONG_NUM_ARGS, "EXPIRE")}
+		return Response{Value: parser.Error(fmt.Sprintf(constants.WRONG_NUM_ARGS, "EXPIRE"))}
 	}
 
 	key := args[0]
 	e, ok := s.data[key]
 	if !ok {
-		return Response{Value: []byte(constants.ZERO)}
+		return Response{Value: parser.Integer(constants.ZERO)}
 	}
 
 	secs, err := strconv.Atoi(args[1])
 	if err != nil || secs < 0 {
-		return Response{Value: []byte(constants.INV_EXPIRY)}
+		return Response{Value: parser.Error(constants.INV_EXPIRY)}
 	}
 
 	e.expiry = time.Now().Add(time.Duration(secs) * time.Second)
 	s.ttls.Push(ttlItem{key: key, expiresAt: e.expiry})
 
-	return Response{Value: []byte(constants.ONE)}
+	return Response{Value: parser.Integer(constants.ONE)}
 }
 
 // TTL command returns the remaining time to live of a key that has an expiry set.
@@ -106,24 +106,23 @@ func (s *Store) expire(args []string) Response {
 // @returns -1: if the key exists but has no expiry, and the TTL in seconds otherwise.
 func (s *Store) ttl(args []string) Response {
 	if len(args) < 1 {
-		return Response{Value: fmt.Appendf(nil, constants.WRONG_NUM_ARGS, "TTL")}
+		return Response{Value: parser.Error(fmt.Sprintf(constants.WRONG_NUM_ARGS, "TTL"))}
 	}
 
 	key := args[0]
 	e, ok := s.data[key]
 	if !ok {
-		return Response{Value: []byte(constants.TTL_KEY_NOT_EXIST)}
+		return Response{Value: parser.Integer(constants.TTL_KEY_NOT_EXIST)}
 	}
 	if e.isExpired() {
-		return Response{Value: []byte(constants.TTL_KEY_NOT_EXIST)}
+		return Response{Value: parser.Integer(constants.TTL_KEY_NOT_EXIST)}
 	}
 	if !e.hasExpiry() {
-		return Response{Value: []byte(constants.TTL_KEY_NO_EXPIRY)}
+		return Response{Value: parser.Integer(constants.TTL_KEY_NO_EXPIRY)}
 	}
 
 	ttl := time.Until(e.expiry).Seconds()
-	resp := fmt.Sprintf(":%d\r\n", int(ttl))
-	return Response{Value: []byte(resp)}
+	return Response{Value: parser.Integer(int(ttl))}
 }
 
 // SUBSCRIBE command allows clients to subscribe to a topic.
@@ -154,7 +153,7 @@ func (s *Store) Unsubscribe(topic string, ch chan []byte) {
 
 func (s *Store) publish(args []string) Response {
 	if len(args) < 2 {
-		return Response{Value: fmt.Appendf(nil, constants.WRONG_NUM_ARGS, "PUBLISH")}
+		return Response{Value: parser.Error(fmt.Sprintf(constants.WRONG_NUM_ARGS, "PUBLISH"))}
 	}
 
 	topic, message := args[0], args[1]
@@ -173,13 +172,12 @@ func (s *Store) publish(args []string) Response {
 		}
 	}
 
-	resp := fmt.Sprintf(":%d\r\n", delivered)
-	return Response{Value: []byte(resp)}
+	return Response{Value: parser.Integer(delivered)}
 }
 
 func (s *Store) evict() {
-   	now := time.Now()
-   	for s.ttls.Len() > 0 {
+	now := time.Now()
+	for s.ttls.Len() > 0 {
 		item, ok := s.ttls.Peek()
 		if !ok || item.expiresAt.After(now) {
 			break
@@ -193,7 +191,7 @@ func (s *Store) evict() {
 }
 
 func (s *Store) snapshot() {
-    snapshotData := make(map[string]snapshotEntry, len(s.data))
+	snapshotData := make(map[string]snapshotEntry, len(s.data))
 	for key, e := range s.data {
 		snapshotData[key] = snapshotEntry{
 			Value:  e.value,

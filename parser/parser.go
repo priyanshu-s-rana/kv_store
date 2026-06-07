@@ -35,31 +35,39 @@ func New(r io.Reader) *Parser {
 // @returns io.EOF: when the stream is exhausted cleanly.
 // @returns error: on malformed input, bad length, or truncated bulk string.
 func (p *Parser) ReadCommand() (*Command, error) {
-	line, err := p.readLine()
-	if err != nil {
-		return nil, err
+	var line string
+	var err error
+
+	for {
+		line, err = p.readLine()
+		if err != nil {
+			return nil, err
+		}
+		if strings.TrimSpace(line) != "" {
+			break
+		}
 	}
 
 	if len(line) == 0 || line[0] != '*' {
 		return p.parseLine(line)
 	}
 
-	arr_length, err := strconv.Atoi(line[1:])
+	arrLength, err := strconv.Atoi(line[1:])
 	if err != nil {
 		return nil, fmt.Errorf(constants.INV_ARRAY_LEN, line)
 	}
 
-	if arr_length <= 0 {
-		return nil, fmt.Errorf(constants.INV_CMD_ARRAY_LEN, arr_length)
+	if arrLength <= 0 {
+		return nil, fmt.Errorf(constants.INV_CMD_ARRAY_LEN, arrLength)
 	}
 
-	parts := make([]string, 0, arr_length)
-	for range arr_length {
-		cmd_string, err := p.readBulkString()
+	parts := make([]string, 0, arrLength)
+	for range arrLength {
+		cmdString, err := p.readBulkString()
 		if err != nil {
 			return nil, err
 		}
-		parts = append(parts, cmd_string)
+		parts = append(parts, cmdString)
 	}
 
 	if len(parts) == 0 {

@@ -30,26 +30,35 @@ func assertValue(t *testing.T, got Response, want string) {
 	}
 }
 
+// RESP wire-format builders for assertions. Reimplemented independently of
+// the parser encoder so the tests pin the exact protocol bytes rather than
+// trusting the encoder under test.
+const respNil = "$-1\r\n"
+
+func respSimple(s string) string { return "+" + s + "\r\n" }
+func respError(s string) string  { return "-ERR " + s + "\r\n" }
+func respInt(n int) string       { return fmt.Sprintf(":%d\r\n", n) }
+func respBulk(s string) string   { return fmt.Sprintf("$%d\r\n%s\r\n", len(s), s) }
+
 // ---- PING ----
 
 func TestPing(t *testing.T) {
 	s := newTestStore()
-	assertValue(t, s.ping(), constants.PONG)
+	assertValue(t, s.ping(), respSimple(constants.PONG))
 }
 
 // ---- GET ----
 
 func TestGetMissing(t *testing.T) {
 	s := newTestStore()
-	assertValue(t, s.get([]string{"missing"}), constants.NIL)
+	assertValue(t, s.get([]string{"missing"}), respNil)
 }
 
 func TestGetPresent(t *testing.T) {
 	s := newTestStore()
 	s.data["foo"] = &entry{value: []byte("bar")}
 	resp := s.get([]string{"foo"})
-	want := "$3\r\nbar\r\n"
-	assertValue(t, resp, want)
+	assertValue(t, resp, respBulk("bar"))
 }
 
 func TestGetExpiredIsLazilyDeleted(t *testing.T) {
@@ -58,7 +67,7 @@ func TestGetExpiredIsLazilyDeleted(t *testing.T) {
 		value:  []byte("bar"),
 		expiry: time.Now().Add(-1 * time.Second), // already expired
 	}
-	assertValue(t, s.get([]string{"foo"}), constants.NIL)
+	assertValue(t, s.get([]string{"foo"}), respNil)
 	if _, exists := s.data["foo"]; exists {
 		t.Errorf("expired key was not lazily deleted")
 	}
@@ -67,7 +76,7 @@ func TestGetExpiredIsLazilyDeleted(t *testing.T) {
 func TestGetWrongArgs(t *testing.T) {
 	s := newTestStore()
 	resp := s.get([]string{})
-	want := fmt.Sprintf(constants.WRONG_NUM_ARGS, "GET")
+	want := respError(fmt.Sprintf(constants.WRONG_NUM_ARGS, "GET"))
 	assertValue(t, resp, want)
 }
 
@@ -75,7 +84,7 @@ func TestGetWrongArgs(t *testing.T) {
 
 func TestSetBasic(t *testing.T) {
 	s := newTestStore()
-	assertValue(t, s.set([]string{"k", "v"}), constants.OK)
+	assertValue(t, s.set([]string{"k", "v"}), respSimple(constants.OK))
 
 	e, ok := s.data["k"]
 	if !ok {
@@ -92,13 +101,13 @@ func TestSetBasic(t *testing.T) {
 func TestSetWrongArgs(t *testing.T) {
 	s := newTestStore()
 	resp := s.set([]string{"k"})
-	want := fmt.Sprintf(constants.WRONG_NUM_ARGS, "SET")
+	want := respError(fmt.Sprintf(constants.WRONG_NUM_ARGS, "SET"))
 	assertValue(t, resp, want)
 }
 
 func TestSetNXKeyMissing(t *testing.T) {
 	s := newTestStore()
-	assertValue(t, s.set([]string{"k", "v", constants.NX}), constants.OK)
+	assertValue(t, s.set([]string{"k", "v", constants.NX}), respSimple(constants.OK))
 	if _, ok := s.data["k"]; !ok {
 		t.Errorf("NX should have set key when absent")
 	}
@@ -107,7 +116,7 @@ func TestSetNXKeyMissing(t *testing.T) {
 func TestSetNXKeyExists(t *testing.T) {
 	s := newTestStore()
 	s.data["k"] = &entry{value: []byte("old")}
-	assertValue(t, s.set([]string{"k", "new", constants.NX}), constants.NIL)
+	assertValue(t, s.set([]string{"k", "new", constants.NX}), respNil)
 	if string(s.data["k"].value) != "old" {
 		t.Errorf("NX should not overwrite, got %q", s.data["k"].value)
 	}
@@ -115,7 +124,7 @@ func TestSetNXKeyExists(t *testing.T) {
 
 func TestSetXXKeyMissing(t *testing.T) {
 	s := newTestStore()
-	assertValue(t, s.set([]string{"k", "v", constants.XX}), constants.NIL)
+	assertValue(t, s.set([]string{"k", "v", constants.XX}), respNil)
 	if _, ok := s.data["k"]; ok {
 		t.Errorf("XX should not have set key when absent")
 	}
@@ -124,7 +133,7 @@ func TestSetXXKeyMissing(t *testing.T) {
 func TestSetXXKeyExists(t *testing.T) {
 	s := newTestStore()
 	s.data["k"] = &entry{value: []byte("old")}
-	assertValue(t, s.set([]string{"k", "new", constants.XX}), constants.OK)
+	assertValue(t, s.set([]string{"k", "new", constants.XX}), respSimple(constants.OK))
 	if string(s.data["k"].value) != "new" {
 		t.Errorf("XX should overwrite, got %q", s.data["k"].value)
 	}
@@ -132,7 +141,7 @@ func TestSetXXKeyExists(t *testing.T) {
 
 func TestSetEX(t *testing.T) {
 	s := newTestStore()
-	assertValue(t, s.set([]string{"k", "v", constants.EX, "10"}), constants.OK)
+	assertValue(t, s.set([]string{"k", "v", constants.EX, "10"}), respSimple(constants.OK))
 
 	e := s.data["k"]
 	if e.expiry.IsZero() {
@@ -149,15 +158,15 @@ func TestSetEX(t *testing.T) {
 
 func TestSetEXMissingSeconds(t *testing.T) {
 	s := newTestStore()
-	assertValue(t, s.set([]string{"k", "v", constants.EX}), constants.INV_EXPIRY)
+	assertValue(t, s.set([]string{"k", "v", constants.EX}), respError(constants.INV_EXPIRY))
 }
 
 func TestSetEXInvalidSeconds(t *testing.T) {
 	s := newTestStore()
-	assertValue(t, s.set([]string{"k", "v", constants.EX, "abc"}), constants.INV_EXPIRY)
+	assertValue(t, s.set([]string{"k", "v", constants.EX, "abc"}), respError(constants.INV_EXPIRY))
 
 	s2 := newTestStore()
-	assertValue(t, s2.set([]string{"k", "v", constants.EX, "-5"}), constants.INV_EXPIRY)
+	assertValue(t, s2.set([]string{"k", "v", constants.EX, "-5"}), respError(constants.INV_EXPIRY))
 }
 
 // ---- DEL ----
@@ -165,7 +174,7 @@ func TestSetEXInvalidSeconds(t *testing.T) {
 func TestDelExists(t *testing.T) {
 	s := newTestStore()
 	s.data["k"] = &entry{value: []byte("v")}
-	assertValue(t, s.del([]string{"k"}), constants.ONE)
+	assertValue(t, s.del([]string{"k"}), respInt(constants.ONE))
 	if _, ok := s.data["k"]; ok {
 		t.Errorf("key not deleted")
 	}
@@ -177,7 +186,7 @@ func TestDelPublishesLockReleased(t *testing.T) {
 
 	ch := s.Subscribe("lock-released:mykey")
 
-	assertValue(t, s.del([]string{"mykey"}), constants.ONE)
+	assertValue(t, s.del([]string{"mykey"}), respInt(constants.ONE))
 
 	select {
 	case msg := <-ch:
@@ -193,7 +202,7 @@ func TestDelMissingDoesNotPublish(t *testing.T) {
 	s := newTestStore()
 	ch := s.Subscribe("lock-released:nope")
 
-	assertValue(t, s.del([]string{"nope"}), constants.ZERO)
+	assertValue(t, s.del([]string{"nope"}), respInt(constants.ZERO))
 
 	select {
 	case msg := <-ch:
@@ -205,13 +214,13 @@ func TestDelMissingDoesNotPublish(t *testing.T) {
 
 func TestDelMissing(t *testing.T) {
 	s := newTestStore()
-	assertValue(t, s.del([]string{"missing"}), constants.ZERO)
+	assertValue(t, s.del([]string{"missing"}), respInt(constants.ZERO))
 }
 
 func TestDelWrongArgs(t *testing.T) {
 	s := newTestStore()
 	resp := s.del([]string{})
-	want := fmt.Sprintf(constants.WRONG_NUM_ARGS, "DEL")
+	want := respError(fmt.Sprintf(constants.WRONG_NUM_ARGS, "DEL"))
 	assertValue(t, resp, want)
 }
 
@@ -219,13 +228,13 @@ func TestDelWrongArgs(t *testing.T) {
 
 func TestExpireKeyMissing(t *testing.T) {
 	s := newTestStore()
-	assertValue(t, s.expire([]string{"missing", "10"}), constants.ZERO)
+	assertValue(t, s.expire([]string{"missing", "10"}), respInt(constants.ZERO))
 }
 
 func TestExpireSetsTTL(t *testing.T) {
 	s := newTestStore()
 	s.data["k"] = &entry{value: []byte("v")}
-	assertValue(t, s.expire([]string{"k", "30"}), constants.ONE)
+	assertValue(t, s.expire([]string{"k", "30"}), respInt(constants.ONE))
 
 	d := time.Until(s.data["k"].expiry)
 	if d < 29*time.Second || d > 31*time.Second {
@@ -239,14 +248,14 @@ func TestExpireSetsTTL(t *testing.T) {
 func TestExpireInvalidSeconds(t *testing.T) {
 	s := newTestStore()
 	s.data["k"] = &entry{value: []byte("v")}
-	assertValue(t, s.expire([]string{"k", "abc"}), constants.INV_EXPIRY)
-	assertValue(t, s.expire([]string{"k", "-1"}), constants.INV_EXPIRY)
+	assertValue(t, s.expire([]string{"k", "abc"}), respError(constants.INV_EXPIRY))
+	assertValue(t, s.expire([]string{"k", "-1"}), respError(constants.INV_EXPIRY))
 }
 
 func TestExpireWrongArgs(t *testing.T) {
 	s := newTestStore()
 	resp := s.expire([]string{"k"})
-	want := fmt.Sprintf(constants.WRONG_NUM_ARGS, "EXPIRE")
+	want := respError(fmt.Sprintf(constants.WRONG_NUM_ARGS, "EXPIRE"))
 	assertValue(t, resp, want)
 }
 
@@ -254,13 +263,13 @@ func TestExpireWrongArgs(t *testing.T) {
 
 func TestTTLKeyMissing(t *testing.T) {
 	s := newTestStore()
-	assertValue(t, s.ttl([]string{"missing"}), constants.TTL_KEY_NOT_EXIST)
+	assertValue(t, s.ttl([]string{"missing"}), respInt(constants.TTL_KEY_NOT_EXIST))
 }
 
 func TestTTLKeyNoExpiry(t *testing.T) {
 	s := newTestStore()
 	s.data["k"] = &entry{value: []byte("v")}
-	assertValue(t, s.ttl([]string{"k"}), constants.TTL_KEY_NO_EXPIRY)
+	assertValue(t, s.ttl([]string{"k"}), respInt(constants.TTL_KEY_NO_EXPIRY))
 }
 
 func TestTTLKeyWithExpiry(t *testing.T) {
@@ -282,13 +291,13 @@ func TestTTLKeyWithExpiry(t *testing.T) {
 func TestTTLExpiredKey(t *testing.T) {
 	s := newTestStore()
 	s.data["k"] = &entry{value: []byte("v"), expiry: time.Now().Add(-1 * time.Second)}
-	assertValue(t, s.ttl([]string{"k"}), constants.TTL_KEY_NOT_EXIST)
+	assertValue(t, s.ttl([]string{"k"}), respInt(constants.TTL_KEY_NOT_EXIST))
 }
 
 func TestTTLWrongArgs(t *testing.T) {
 	s := newTestStore()
 	resp := s.ttl([]string{})
-	want := fmt.Sprintf(constants.WRONG_NUM_ARGS, "TTL")
+	want := respError(fmt.Sprintf(constants.WRONG_NUM_ARGS, "TTL"))
 	assertValue(t, resp, want)
 }
 
@@ -364,7 +373,7 @@ func TestUnsubscribe(t *testing.T) {
 func TestPublishWrongArgs(t *testing.T) {
 	s := newTestStore()
 	resp := s.publish([]string{"only-topic"})
-	want := fmt.Sprintf(constants.WRONG_NUM_ARGS, "PUBLISH")
+	want := respError(fmt.Sprintf(constants.WRONG_NUM_ARGS, "PUBLISH"))
 	assertValue(t, resp, want)
 }
 

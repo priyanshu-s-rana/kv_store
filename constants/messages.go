@@ -1,18 +1,19 @@
 package constants
 
 const (
-	ONE               = ":1\r\n"
-	ZERO              = ":0\r\n"
+	ONE               = 1
+	ZERO              = 0
 	NIL               = "$-1\r\n"
-	TTL_KEY_NO_EXPIRY = ":-1\r\n"
-	TTL_KEY_NOT_EXIST = ":-2\r\n"
-	OK                = "+OK\r\n"
-	PONG              = "+PONG\r\n"
+	NIL_ARRAY         = "*-1\r\n"
+	TTL_KEY_NO_EXPIRY = -1
+	TTL_KEY_NOT_EXIST = -2
+	OK                = "OK"
+	PONG              = "PONG"
 
 	// Error messages
-	INV_EXPIRY         = "-ERR invalid expiry time\r\n"
-	WRONG_NUM_ARGS     = "-ERR wrong number of arguments for %s\r\n"
-	UNKNOWN_CMD        = "-ERR unknown command %s\r\n"
+	INV_EXPIRY         = "invalid expiry time"
+	WRONG_NUM_ARGS     = "wrong number of arguments for %s"
+	UNKNOWN_CMD        = "unknown command %s"
 	INV_ARR_LEN_PARSER = "invalid array length: %s"
 	EMPTY_CMD          = "empty line command"
 	INV_ARRAY_LEN      = "invalid array length: %s"
