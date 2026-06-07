@@ -38,11 +38,12 @@ type ttlItem struct {
 }
 
 type Store struct {
-	data    map[string]*entry        // Real data of key value
-	cmdChan chan Command             // Command channel which Event Loop interacts with
-	ttls    *heap.Heap[ttlItem]      // TTL heap
-	pubsub  map[string][]chan []byte // Pubsub for different Clients
-	mut     sync.Mutex               // Mutex for pubsub
+	data     map[string]*entry        // Real data of key value
+	cmdChan  chan Command             // Command channel which Event Loop interacts with
+	ttls     *heap.Heap[ttlItem]      // TTL heap
+	pubsub   map[string][]chan []byte // Pubsub for different Clients
+	mut      sync.Mutex               // Mutex for pubsub
+	snapResp chan SnapshotResponse    // Channel for snapshot responses
 }
 
 func New() *Store {
@@ -52,7 +53,8 @@ func New() *Store {
 		ttls: heap.New[ttlItem](func(a, b ttlItem) bool {
 			return a.expiresAt.Before(b.expiresAt)
 		}),
-		pubsub: make(map[string][]chan []byte),
+		pubsub:   make(map[string][]chan []byte),
+		snapResp: make(chan SnapshotResponse, 1),
 	}
 
 	go store.eventLoop()
@@ -83,8 +85,11 @@ func (store *Store) eventLoop() {
 			resp = store.expire(cmd.Args)
 		case constants.Publish:
 			resp = store.publish(cmd.Args)
-		case "_EVICT":
+		case constants.EVICT:
 			store.evict()
+			continue
+		case constants.Snapshot:
+			store.snapshot()
 			continue
 		default:
 			resp = store._default(cmd)

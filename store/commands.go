@@ -191,3 +191,18 @@ func (s *Store) evict() {
 		}
 	}
 }
+
+func (s *Store) snapshot() {
+    snapshotData := make(map[string]snapshotEntry, len(s.data))
+	for key, e := range s.data {
+		snapshotData[key] = snapshotEntry{
+			Value:  e.value,
+			Expiry: e.expiry,
+		}
+	}
+
+	select {
+	case s.snapResp <- SnapshotResponse{data: snapshotData, err: nil}:
+	default:
+	}
+}

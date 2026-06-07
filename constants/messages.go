@@ -19,4 +19,10 @@ const (
 	INV_CMD_ARRAY_LEN  = "invalid command array length: %d"
 	INV_STR_PARSER     = "invalid bulk string format: %s"
 	INV_STR_LEN_PARSER = "invalid bulk string length: %s"
+
+	// Log messages
+	SNAPSHOT_SAVED     = "Snapshot saved successfully to: %s"
+	SNAPSHOT_FAILED    = "Failed to save snapshot: %v"
+	SNAPSHOT_NOT_FOUND = "No snapshot found to load at: %s"
+	SNAPSHOT_LOADED    = "Snapshot loaded: %d keys successfully from: %s"
 )
