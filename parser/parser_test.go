@@ -20,7 +20,7 @@ func assertCmd(t *testing.T, got *Command, name string, args ...string) {
 	if got == nil {
 		t.Fatalf("Command is nil")
 	}
-	if got.Name != name {
+	if string(got.Name) != name {
 		t.Errorf("Name = %q, want %q", got.Name, name)
 	}
 	if len(got.Args) != len(args) {
@@ -105,22 +105,135 @@ func TestInlineLFOnlyLineEnding(t *testing.T) {
 	assertCmd(t, cmd, "PING")
 }
 
-// Verifies an empty line returns an error.
-// Example: "\r\n" → error
-func TestInlineEmptyLine(t *testing.T) {
-	_, err := parse(t, "\r\n")
-	if err == nil {
-		t.Errorf("expected error for empty line, got nil")
+// Verifies leading and trailing spaces around a command are ignored.
+// Example: "  GET foo  \r\n" → {Name: "GET", Args: ["foo"]}
+func TestInlineLeadingTrailingSpaces(t *testing.T) {
+	cmd, err := parse(t, "  GET foo  \r\n")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	assertCmd(t, cmd, "GET", "foo")
+}
+
+// Verifies tabs act as token separators like spaces.
+// Example: "GET\tfoo\r\n" → {Name: "GET", Args: ["foo"]}
+func TestInlineTabSeparator(t *testing.T) {
+	cmd, err := parse(t, "GET\tfoo\r\n")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	assertCmd(t, cmd, "GET", "foo")
+}
+
+// Verifies a mix of tabs and spaces (leading, inner, trailing) is collapsed.
+// Example: "\t SET \t k   v \t\r\n" → {Name: "SET", Args: ["k", "v"]}
+func TestInlineMixedTabsAndSpaces(t *testing.T) {
+	cmd, err := parse(t, "\t SET \t k   v \t\r\n")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	assertCmd(t, cmd, "SET", "k", "v")
+}
+
+// ---- BLANK LINE HANDLING ----
+
+// Verifies a leading blank line is skipped and the next command is parsed.
+// Example: "\r\nPING\r\n" → {Name: "PING", Args: []}
+func TestBlankLineSkipped(t *testing.T) {
+	cmd, err := parse(t, "\r\nPING\r\n")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	assertCmd(t, cmd, "PING")
+}
+
+// Verifies a whitespace-only line is skipped, same as a truly-blank line.
+// Example: "   \r\nPING\r\n" → {Name: "PING", Args: []}
+func TestWhitespaceOnlyLineSkipped(t *testing.T) {
+	cmd, err := parse(t, "   \r\nPING\r\n")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	assertCmd(t, cmd, "PING")
+}
+
+// Verifies a tab-only line is skipped (tabs are whitespace too).
+// Example: "\t\t\r\nPING\r\n" → {Name: "PING", Args: []}
+func TestTabOnlyLineSkipped(t *testing.T) {
+	cmd, err := parse(t, "\t\t\r\nPING\r\n")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	assertCmd(t, cmd, "PING")
+}
+
+// Verifies a run of mixed blank and whitespace-only lines is fully skipped.
+// Example: "\r\n   \r\n\t\r\nGET foo\r\n" → {Name: "GET", Args: ["foo"]}
+func TestMixedBlankAndWhitespaceLinesSkipped(t *testing.T) {
+	cmd, err := parse(t, "\r\n   \r\n\t\r\nGET foo\r\n")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	assertCmd(t, cmd, "GET", "foo")
+}
+
+// Verifies a lone whitespace-only line with nothing after it returns io.EOF —
+// the line is skipped, then the stream is exhausted.
+// Example: "   \r\n" → io.EOF
+func TestWhitespaceOnlyLineThenEOF(t *testing.T) {
+	_, err := parse(t, "   \r\n")
+	if err != io.EOF {
+		t.Errorf("expected io.EOF after lone whitespace line, got %v", err)
 	}
 }
 
-// Verifies a line containing only whitespace returns an error.
-// Example: "   \r\n" → error
-func TestInlineWhitespaceOnly(t *testing.T) {
-	_, err := parse(t, "   \r\n")
-	if err == nil {
-		t.Errorf("expected error for whitespace-only line, got nil")
+// Verifies several consecutive blank lines are all skipped.
+// Example: "\r\n\r\n\r\nGET foo\r\n" → {Name: "GET", Args: ["foo"]}
+func TestMultipleBlankLinesSkipped(t *testing.T) {
+	cmd, err := parse(t, "\r\n\r\n\r\nGET foo\r\n")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
 	}
+	assertCmd(t, cmd, "GET", "foo")
+}
+
+// Verifies a blank line skipped before a RESP array still parses the array.
+// Example: "\r\n*1\r\n$4\r\nPING\r\n" → {Name: "PING", Args: []}
+func TestBlankLineSkippedBeforeResp(t *testing.T) {
+	cmd, err := parse(t, "\r\n*1\r\n$4\r\nPING\r\n")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	assertCmd(t, cmd, "PING")
+}
+
+// Verifies a lone blank line with nothing after it returns io.EOF — the
+// blank is skipped, then the stream is exhausted.
+// Example: "\r\n" → io.EOF
+func TestBlankLineThenEOF(t *testing.T) {
+	_, err := parse(t, "\r\n")
+	if err != io.EOF {
+		t.Errorf("expected io.EOF after lone blank line, got %v", err)
+	}
+}
+
+// Verifies blank lines between two commands are skipped during sequential
+// reads — the second ReadCommand returns the command after the blanks.
+// Example: "PING\r\n\r\n\r\nGET foo\r\n" → PING, then GET foo
+func TestBlankLinesBetweenCommands(t *testing.T) {
+	p := New(strings.NewReader("PING\r\n\r\n\r\nGET foo\r\n"))
+
+	c1, err := p.ReadCommand()
+	if err != nil {
+		t.Fatalf("read 1: %v", err)
+	}
+	assertCmd(t, c1, "PING")
+
+	c2, err := p.ReadCommand()
+	if err != nil {
+		t.Fatalf("read 2: %v", err)
+	}
+	assertCmd(t, c2, "GET", "foo")
 }
 
 // ---- RESP ARRAY COMMANDS ----
@@ -149,7 +262,8 @@ func TestRespArraySingleElement(t *testing.T) {
 
 // Verifies a four-element RESP array parses into name + three args.
 // Example: "*4\r\n$3\r\nSET\r\n$3\r\nkey\r\n$3\r\nval\r\n$2\r\nEX\r\n"
-//          → {Name: "SET", Args: ["key", "val", "EX"]}
+//
+//	→ {Name: "SET", Args: ["key", "val", "EX"]}
 func TestRespArrayMultipleArgs(t *testing.T) {
 	input := "*4\r\n$3\r\nSET\r\n$3\r\nkey\r\n$3\r\nval\r\n$2\r\nEX\r\n"
 	cmd, err := parse(t, input)

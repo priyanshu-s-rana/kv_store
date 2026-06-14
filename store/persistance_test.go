@@ -1,6 +1,7 @@
 package store
 
 import (
+	"context"
 	"encoding/gob"
 	"os"
 	"path/filepath"
@@ -263,13 +264,18 @@ func TestStartSnapshotting(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping timed snapshotting test in -short mode")
 	}
+
+	// Cancel before TempDir cleanup so the goroutine stops before the directory is deleted.
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
 	dir := t.TempDir()
 	path := filepath.Join(dir, "snap.gob")
 
 	s := New()
 	send(t, s, constants.Set, "k", "v")
 
-	s.StartSnapshotting(path, 50*time.Millisecond)
+	s.StartSnapshotting(ctx, path, 50*time.Millisecond)
 
 	deadline := time.After(2 * time.Second)
 	for {

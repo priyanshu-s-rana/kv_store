@@ -1,6 +1,7 @@
 package store
 
 import (
+	"context"
 	"encoding/gob"
 	"log"
 	"os"
@@ -29,14 +30,22 @@ type SnapshotResponse struct {
 	err  error
 }
 
-func (s *Store) StartSnapshotting(path string, interval time.Duration) {
+// StartSnapshotting saves the store to disk at every interval until ctx is cancelled.
+// The caller is responsible for cancelling ctx to stop the goroutine and release the ticker.
+func (s *Store) StartSnapshotting(ctx context.Context, path string, interval time.Duration) {
 	ticker := time.NewTicker(interval)
 	go func() {
-		for range ticker.C {
-			if err := s.SaveToDisk(path); err != nil {
-				log.Printf(constants.SNAPSHOT_FAILED, err)
-			} else {
-				log.Printf(constants.SNAPSHOT_SAVED, path)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				if err := s.SaveToDisk(path); err != nil {
+					log.Printf(constants.SNAPSHOT_FAILED, err)
+				} else {
+					log.Printf(constants.SNAPSHOT_SAVED, path)
+				}
 			}
 		}
 	}()

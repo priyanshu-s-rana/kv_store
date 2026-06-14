@@ -99,8 +99,9 @@ func TestNewStartsEventLoop(t *testing.T) {
 
 	// If the event loop wasn't running, this send would block past the timeout.
 	resp := send(t, s, constants.Ping)
-	if !bytes.Equal(resp.Value, []byte(constants.PONG)) {
-		t.Errorf("PING response = %q, want %q", resp.Value, constants.PONG)
+	want := respSimple(constants.PONG)
+	if !bytes.Equal(resp.Value, []byte(want)) {
+		t.Errorf("PING response = %q, want %q", resp.Value, want)
 	}
 }
 
@@ -125,8 +126,9 @@ func TestCmdChanReturnsSendOnly(t *testing.T) {
 func TestEventLoopDispatchesPing(t *testing.T) {
 	s := New()
 	resp := send(t, s, constants.Ping)
-	if !bytes.Equal(resp.Value, []byte(constants.PONG)) {
-		t.Errorf("got %q, want %q", resp.Value, constants.PONG)
+	want := respSimple(constants.PONG)
+	if !bytes.Equal(resp.Value, []byte(want)) {
+		t.Errorf("got %q, want %q", resp.Value, want)
 	}
 }
 
@@ -134,12 +136,12 @@ func TestEventLoopDispatchesSetGet(t *testing.T) {
 	s := New()
 
 	setResp := send(t, s, constants.Set, "k", "v")
-	if !bytes.Equal(setResp.Value, []byte(constants.OK)) {
-		t.Fatalf("SET = %q, want %q", setResp.Value, constants.OK)
+	if !bytes.Equal(setResp.Value, []byte(respSimple(constants.OK))) {
+		t.Fatalf("SET = %q, want %q", setResp.Value, respSimple(constants.OK))
 	}
 
 	getResp := send(t, s, constants.Get, "k")
-	want := "$1\r\nv\r\n"
+	want := respBulk("v")
 	if !bytes.Equal(getResp.Value, []byte(want)) {
 		t.Errorf("GET = %q, want %q", getResp.Value, want)
 	}
@@ -150,13 +152,13 @@ func TestEventLoopDispatchesDel(t *testing.T) {
 	send(t, s, constants.Set, "k", "v")
 
 	delResp := send(t, s, constants.Del, "k")
-	if !bytes.Equal(delResp.Value, []byte(constants.ONE)) {
-		t.Errorf("DEL = %q, want %q", delResp.Value, constants.ONE)
+	if !bytes.Equal(delResp.Value, []byte(respInt(constants.ONE))) {
+		t.Errorf("DEL = %q, want %q", delResp.Value, respInt(constants.ONE))
 	}
 
 	getResp := send(t, s, constants.Get, "k")
-	if !bytes.Equal(getResp.Value, []byte(constants.NIL)) {
-		t.Errorf("GET after DEL = %q, want %q", getResp.Value, constants.NIL)
+	if !bytes.Equal(getResp.Value, []byte(respNil)) {
+		t.Errorf("GET after DEL = %q, want %q", getResp.Value, respNil)
 	}
 }
 
@@ -225,7 +227,7 @@ func TestEventLoopDoesNotBlockOnUnreadResponse(t *testing.T) {
 
 	// If event loop blocked, this follow-up send would time out.
 	resp := send(t, s, constants.Ping)
-	if !bytes.Equal(resp.Value, []byte(constants.PONG)) {
+	if !bytes.Equal(resp.Value, []byte(respSimple(constants.PONG))) {
 		t.Errorf("event loop appears stuck — follow-up PING failed: %q", resp.Value)
 	}
 }
