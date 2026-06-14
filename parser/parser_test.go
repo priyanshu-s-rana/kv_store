@@ -20,7 +20,7 @@ func assertCmd(t *testing.T, got *Command, name string, args ...string) {
 	if got == nil {
 		t.Fatalf("Command is nil")
 	}
-	if got.Name != name {
+	if string(got.Name) != name {
 		t.Errorf("Name = %q, want %q", got.Name, name)
 	}
 	if len(got.Args) != len(args) {

@@ -11,7 +11,7 @@ import (
 )
 
 type Command struct {
-	Name string
+	Name constants.CmdName
 	Args []string
 }
 
@@ -75,7 +75,7 @@ func (p *Parser) ReadCommand() (*Command, error) {
 	}
 
 	return &Command{
-		Name: strings.ToUpper(parts[0]),
+		Name: constants.CmdName(strings.ToUpper(parts[0])),
 		Args: parts[1:],
 	}, nil
 }
@@ -102,7 +102,7 @@ func (p *Parser) parseLine(line string) (*Command, error) {
 	}
 
 	return &Command{
-		Name: strings.ToUpper(parts[0]),
+		Name: constants.CmdName(strings.ToUpper(parts[0])),
 		Args: parts[1:],
 	}, nil
 }
