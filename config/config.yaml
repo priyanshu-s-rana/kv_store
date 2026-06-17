@@ -1,6 +1,6 @@
 SERVER:
-  PORT: 5040
+  PORT: ":5040"
 
 SNAPSHOT:
-  PATH: "/data/dump.rb"
-  INTERVAL: 60
+  PATH: "./data/dump.rb"
+  INTERVAL: 60s

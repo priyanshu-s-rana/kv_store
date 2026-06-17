@@ -187,6 +187,24 @@ func TestEventLoopUnknownCommand(t *testing.T) {
 	}
 }
 
+// ---- TTL countdown ----
+
+// Samples TTL every second so you can see it count down in real time.
+// Run with: go test -v -run TestTTLCountdown ./store/
+func TestTTLCountdown(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping TTL countdown test in -short mode")
+	}
+	s := New()
+	send(t, s, constants.Set, "countdown", "v", constants.EX, "10")
+
+	for tick := range 13 {
+		resp := send(t, s, constants.TTL, "countdown")
+		t.Logf("t+%2ds → TTL = %s", tick, bytes.TrimRight(resp.Value, "\r\n"))
+		time.Sleep(time.Second)
+	}
+}
+
 // ---- TTL eviction integration ----
 // Slow test — uses real ticker. Run with -short to skip.
 

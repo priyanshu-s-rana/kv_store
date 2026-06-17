@@ -1,0 +1,5 @@
+# snapshot data
+data/
+
+# build output
+kv_store
