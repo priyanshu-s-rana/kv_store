@@ -12,12 +12,10 @@ var CONFIG models.CFG
 
 func SetConfig() {
 
-	// Adding config path
+	viper.SetConfigName("config")
+	viper.SetConfigType("yaml")
 	viper.AddConfigPath(".")
 	viper.AddConfigPath("./config")
-
-	// Giving config file name with extension
-	viper.SetConfigFile("config.yaml")
 
 	err := viper.ReadInConfig()
 	if err != nil {

@@ -236,6 +236,25 @@ func TestSubscribeAndPublish(t *testing.T) {
 	}
 }
 
+// TestTTLCountdown samples TTL every second over the wire to catch any server-layer expiry bugs.
+// Run with: go test -v -run TestTTLCountdown ./server/
+func TestTTLCountdown(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping TTL countdown test in -short mode")
+	}
+	conn, r := testConn(t)
+
+	writeLine(t, conn, "SET countdown val EX 10")
+	readResp(t, r, conn) // discard +OK
+
+	for tick := range 13 {
+		writeLine(t, conn, "TTL countdown")
+		got := readResp(t, r, conn)
+		t.Logf("t+%2ds → TTL = %s", tick, got[:len(got)-2]) // strip \r\n for readability
+		time.Sleep(time.Second)
+	}
+}
+
 func TestSubscribeNoTopics(t *testing.T) {
 	conn, r := testConn(t)
 	writeLine(t, conn, "SUBSCRIBE")

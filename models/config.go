@@ -1,11 +1,13 @@
 package models
 
+import "time"
+
 type CFG struct {
 	Server struct {
-		Port int `mapstructure:"port"`
+		Port string `mapstructure:"port"`
 	} `mapstructure:"server"`
 	Snapshot struct {
-		Path     string `mapstructure:"path"`
-		Interval int 	`mapstructure:"interval"`
+		Path     string        `mapstructure:"path"`
+		Interval time.Duration `mapstructure:"interval"`
 	} `mapstructure:"snapshot"`
 }

@@ -5,6 +5,7 @@ import (
 	"encoding/gob"
 	"log"
 	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/priyanshu-s-rana/kv_store/constants"
@@ -58,6 +59,10 @@ func (s *Store) SaveToDisk(path string) error {
 	resp := <-s.snapResp
 	if resp.err != nil {
 		return resp.err
+	}
+
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
 	}
 
 	tempPath := path + ".tmp"
