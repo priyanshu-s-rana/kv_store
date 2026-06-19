@@ -14,6 +14,8 @@ import (
 	"github.com/priyanshu-s-rana/kv_store/utils"
 )
 
+// gracefulShutdown blocks until SIGINT or SIGTERM is received, then cancels the
+// context, flushes a final snapshot to disk, and exits cleanly.
 func gracefulShutdown(store *store.Store, cancel context.CancelFunc) {
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)

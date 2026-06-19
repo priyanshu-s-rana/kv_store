@@ -10,6 +10,9 @@ import (
 	"github.com/priyanshu-s-rana/kv_store/parser"
 )
 
+// set_with_modifiers applies NX, XX, and EX modifiers to the entry before it is stored.
+// @returns Response, false: if a modifier condition blocks the write,
+// @returns OK, true: if all modifiers passed.
 func set_with_modifiers(s *Store, args []string, e *entry) (Response, bool) {
 	n := len(args)
 	key := args[0]
@@ -43,6 +46,8 @@ func set_with_modifiers(s *Store, args []string, e *entry) (Response, bool) {
 	return Response{Value: parser.SimpleString(constants.OK)}, true
 }
 
+// keyMatcher returns a function that reports whether a key matches the glob-style pattern.
+// Supports leading *, trailing *, both (* contains *), and exact match.
 func keyMatcher(pattern string) func(string) bool {
 	prefix := pattern[0] == '*'
 	suffix := pattern[len(pattern)-1] == '*'
@@ -62,6 +67,7 @@ func keyMatcher(pattern string) func(string) bool {
 	}
 }
 
+// _default returns an unknown command error for any unrecognised command name.
 func (s *Store) _default(cmd Command) Response {
 	return Response{Value: parser.Error(fmt.Sprintf(constants.UNKNOWN_CMD, cmd.Name))}
 }

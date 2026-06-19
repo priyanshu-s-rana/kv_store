@@ -52,6 +52,8 @@ func (s *Store) StartSnapshotting(ctx context.Context, path string, interval tim
 	}()
 }
 
+// SaveToDisk requests a snapshot via the event loop, then encodes it to path using a
+// temp-file-then-rename strategy to avoid partial writes.
 func (s *Store) SaveToDisk(path string) error {
 
 	s.cmdChan <- Command{Name: constants.Snapshot}
@@ -81,6 +83,8 @@ func (s *Store) SaveToDisk(path string) error {
 	return os.Rename(tempPath, path)
 }
 
+// LoadFromDisk reads a gob-encoded snapshot from path and hydrates the store.
+// Returns nil (not an error) if no snapshot file exists yet.
 func (s *Store) LoadFromDisk(path string) error {
 	f, err := os.Open(path)
 	if os.IsNotExist(err) {

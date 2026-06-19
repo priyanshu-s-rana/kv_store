@@ -46,6 +46,7 @@ type Store struct {
 	snapResp chan SnapshotResponse    // Channel for snapshot responses
 }
 
+// New creates and returns a Store with its event loop and TTL eviction goroutines running.
 func New() *Store {
 	store := &Store{
 		data:    make(map[string]*entry),
@@ -63,10 +64,12 @@ func New() *Store {
 	return store
 }
 
+// CmdChan returns a write-only channel for submitting commands to the event loop.
 func (store *Store) CmdChan() chan<- Command {
 	return store.cmdChan
 }
 
+// eventLoop processes commands from cmdChan sequentially, ensuring single-threaded data access.
 func (store *Store) eventLoop() {
 	for cmd := range store.cmdChan {
 		var resp Response
@@ -106,6 +109,7 @@ func (store *Store) eventLoop() {
 	}
 }
 
+// ttlEviction ticks every second and sends an internal EVICT command to prune expired keys.
 func (store *Store) ttlEviction() {
 	ticker := time.NewTicker(1 * time.Second)
 	defer ticker.Stop()

@@ -11,6 +11,7 @@ import (
 	"github.com/priyanshu-s-rana/kv_store/parser"
 )
 
+// PING command returns PONG, used to check server liveness.
 func (s *Store) ping() Response {
 	return Response{Value: parser.SimpleString(constants.PONG)}
 }
@@ -139,6 +140,7 @@ func (s *Store) Subscribe(topic string) chan []byte {
 	return ch
 }
 
+// Unsubscribe removes ch from the subscriber list for topic.
 func (s *Store) Unsubscribe(topic string, ch chan []byte) {
 	s.mut.Lock()
 
@@ -153,6 +155,8 @@ func (s *Store) Unsubscribe(topic string, ch chan []byte) {
 	s.mut.Unlock()
 }
 
+// PUBLISH command sends a message to all subscribers of the given topic.
+// @returns the number of subscribers that received the message.
 func (s *Store) publish(args []string) Response {
 	if len(args) < 2 {
 		return Response{Value: parser.Error(fmt.Sprintf(constants.WRONG_NUM_ARGS, "PUBLISH"))}
@@ -177,6 +181,7 @@ func (s *Store) publish(args []string) Response {
 	return Response{Value: parser.Integer(delivered)}
 }
 
+// evict removes all expired keys whose TTL entries have reached the front of the heap.
 func (s *Store) evict() {
 	now := time.Now()
 	for s.ttls.Len() > 0 {
@@ -192,6 +197,7 @@ func (s *Store) evict() {
 	}
 }
 
+// snapshot captures a point-in-time copy of the store and sends it on snapResp.
 func (s *Store) snapshot() {
 	snapshotData := make(map[string]snapshotEntry, len(s.data))
 	for key, e := range s.data {
@@ -207,6 +213,8 @@ func (s *Store) snapshot() {
 	}
 }
 
+// KEYS command returns all keys matching the given glob-style pattern.
+// @returns bulk string with keys numbered and newline-separated.
 func (s *Store) keys(args []string) Response {
 	var keys []string
 	keyCount := 1
@@ -222,6 +230,8 @@ func (s *Store) keys(args []string) Response {
 	return Response{Value: parser.BulkString(strings.Join(keys, "\n"))}
 }
 
+// FLUSHALL command deletes all keys and resets the TTL heap.
+// @returns OK: always.
 func (s *Store) flushAll() Response {
 	clear(s.data)
 	s.ttls = heap.New[ttlItem](func(a, b ttlItem) bool {

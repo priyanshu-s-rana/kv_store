@@ -68,6 +68,7 @@ func main() {
 	}
 }
 
+// readServerResponse reads one RESP message from serverReader and returns it as a string.
 func readServerResponse(serverReader *bufio.Reader) (string, error) {
 	data, err := serverReader.Peek(1)
 	if len(data) == 0 || err != nil {

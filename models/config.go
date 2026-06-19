@@ -2,6 +2,7 @@ package models
 
 import "time"
 
+// CFG holds the top-level server configuration loaded from config.yaml.
 type CFG struct {
 	Server struct {
 		Host string `mapstructure:"host"`
