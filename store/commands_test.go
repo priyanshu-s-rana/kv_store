@@ -484,6 +484,119 @@ func TestEvictStopsAtFirstAlive(t *testing.T) {
 	}
 }
 
+// ---- KEYS ----
+
+func TestKeysExactMatch(t *testing.T) {
+	s := newTestStore()
+	s.data["foo"] = &entry{value: []byte("bar")}
+	s.data["baz"] = &entry{value: []byte("qux")}
+
+	assertValue(t, s.keys([]string{"foo"}), respBulk("1) foo"))
+}
+
+func TestKeysExactNoMatch(t *testing.T) {
+	s := newTestStore()
+	s.data["foo"] = &entry{value: []byte("bar")}
+
+	assertValue(t, s.keys([]string{"missing"}), respBulk(""))
+}
+
+func TestKeysWildcardAll(t *testing.T) {
+	s := newTestStore()
+	s.data["foo"] = &entry{value: []byte("1")}
+	s.data["bar"] = &entry{value: []byte("2")}
+
+	resp := s.keys([]string{"*"})
+	if !bytes.Contains(resp.Value, []byte("foo")) {
+		t.Errorf("keys(*) missing foo: %q", resp.Value)
+	}
+	if !bytes.Contains(resp.Value, []byte("bar")) {
+		t.Errorf("keys(*) missing bar: %q", resp.Value)
+	}
+}
+
+func TestKeysPrefixWildcard(t *testing.T) {
+	s := newTestStore()
+	s.data["user:1"] = &entry{value: []byte("a")}
+	s.data["user:2"] = &entry{value: []byte("b")}
+	s.data["session:1"] = &entry{value: []byte("c")}
+
+	resp := s.keys([]string{"user:*"})
+	if !bytes.Contains(resp.Value, []byte("user:1")) {
+		t.Errorf("keys(user:*) missing user:1: %q", resp.Value)
+	}
+	if !bytes.Contains(resp.Value, []byte("user:2")) {
+		t.Errorf("keys(user:*) missing user:2: %q", resp.Value)
+	}
+	if bytes.Contains(resp.Value, []byte("session:1")) {
+		t.Errorf("keys(user:*) should not contain session:1: %q", resp.Value)
+	}
+}
+
+func TestKeysSuffixWildcard(t *testing.T) {
+	s := newTestStore()
+	s.data["user:1"] = &entry{value: []byte("a")}
+	s.data["admin:1"] = &entry{value: []byte("b")}
+	s.data["user:2"] = &entry{value: []byte("c")}
+
+	resp := s.keys([]string{"*:1"})
+	if !bytes.Contains(resp.Value, []byte("user:1")) {
+		t.Errorf("keys(*:1) missing user:1: %q", resp.Value)
+	}
+	if !bytes.Contains(resp.Value, []byte("admin:1")) {
+		t.Errorf("keys(*:1) missing admin:1: %q", resp.Value)
+	}
+	if bytes.Contains(resp.Value, []byte("user:2")) {
+		t.Errorf("keys(*:1) should not contain user:2: %q", resp.Value)
+	}
+}
+
+func TestKeysContainsWildcard(t *testing.T) {
+	s := newTestStore()
+	s.data["foo:bar"] = &entry{value: []byte("a")}
+	s.data["baz:bar"] = &entry{value: []byte("b")}
+	s.data["foo:qux"] = &entry{value: []byte("c")}
+
+	resp := s.keys([]string{"*:bar*"})
+	if !bytes.Contains(resp.Value, []byte("foo:bar")) {
+		t.Errorf("keys(*:bar*) missing foo:bar: %q", resp.Value)
+	}
+	if !bytes.Contains(resp.Value, []byte("baz:bar")) {
+		t.Errorf("keys(*:bar*) missing baz:bar: %q", resp.Value)
+	}
+	if bytes.Contains(resp.Value, []byte("foo:qux")) {
+		t.Errorf("keys(*:bar*) should not contain foo:qux: %q", resp.Value)
+	}
+}
+
+func TestKeysEmptyStore(t *testing.T) {
+	s := newTestStore()
+	assertValue(t, s.keys([]string{"*"}), respBulk(""))
+}
+
+// ---- FLUSHALL ----
+
+func TestFlushAll(t *testing.T) {
+	s := newTestStore()
+	s.data["k1"] = &entry{value: []byte("v1")}
+	s.data["k2"] = &entry{value: []byte("v2"), expiry: time.Now().Add(time.Hour)}
+	s.ttls.Push(ttlItem{key: "k2", expiresAt: s.data["k2"].expiry})
+
+	assertValue(t, s.flushAll(), respSimple(constants.OK))
+
+	if len(s.data) != 0 {
+		t.Errorf("data not cleared, len = %d", len(s.data))
+	}
+	if s.ttls.Len() != 0 {
+		t.Errorf("ttls not cleared, len = %d", s.ttls.Len())
+	}
+}
+
+func TestFlushAllEmptyStore(t *testing.T) {
+	s := newTestStore()
+	assertValue(t, s.flushAll(), respSimple(constants.OK))
+}
+
 // ---- SNAPSHOT ----
 
 // Verifies snapshot copies every key's value and expiry into the response

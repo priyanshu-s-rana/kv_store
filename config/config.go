@@ -17,17 +17,15 @@ func SetConfig() {
 	viper.AddConfigPath(".")
 	viper.AddConfigPath("./config")
 
-	err := viper.ReadInConfig()
-	if err != nil {
-		log.Println("Config file not found, using env/defaults")
+	if err := viper.ReadInConfig(); err != nil {
+		log.Fatalf("Config file not found: %v", err)
 	}
 
 	// Automatic env override
 	viper.AutomaticEnv()
 	viper.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))
 
-	err = viper.Unmarshal(&CONFIG)
-	if err != nil {
+	if err := viper.Unmarshal(&CONFIG); err != nil {
 		log.Fatal("Unable to decode config")
 	}
 }

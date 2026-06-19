@@ -85,6 +85,10 @@ func (store *Store) eventLoop() {
 			resp = store.expire(cmd.Args)
 		case constants.Publish:
 			resp = store.publish(cmd.Args)
+		case constants.Keys:
+			resp = store.keys(cmd.Args)
+		case constants.FlushAll:
+			resp = store.flushAll()
 		case constants.EVICT:
 			store.evict()
 			continue

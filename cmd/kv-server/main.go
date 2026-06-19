@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"flag"
 	"log"
 	"os"
 	"os/signal"
@@ -10,6 +11,7 @@ import (
 	"github.com/priyanshu-s-rana/kv_store/config"
 	"github.com/priyanshu-s-rana/kv_store/server"
 	"github.com/priyanshu-s-rana/kv_store/store"
+	"github.com/priyanshu-s-rana/kv_store/utils"
 )
 
 func gracefulShutdown(store *store.Store, cancel context.CancelFunc) {
@@ -28,9 +30,16 @@ func gracefulShutdown(store *store.Store, cancel context.CancelFunc) {
 }
 
 func main() {
+	hostFlag := flag.String("h", "", "server host, overrides config.yaml")
+	portFlag := flag.String("p", "", "server port, overrides config.yaml")
+	flag.Parse()
+
 	config.SetConfig()
 
-	port := config.CONFIG.Server.Port
+	host := utils.ResolveStringFallbacks(*hostFlag, config.CONFIG.Server.Host, "localhost")
+	port := utils.ResolveStringFallbacks(*portFlag, config.CONFIG.Server.Port, "5040")
+	addr := host + ":" + port
+
 	snapshotPath := config.CONFIG.Snapshot.Path
 	snapshotInterval := config.CONFIG.Snapshot.Interval
 
@@ -45,10 +54,9 @@ func main() {
 		store.StartSnapshotting(ctx, snapshotPath, snapshotInterval)
 	}
 
-
 	go gracefulShutdown(store, cancel)
 
-	server := server.New(port, store)
+	server := server.New(addr, store)
 	log.Printf("[main] KV Store starting server on port %s", port)
 	if err := server.Start(); err != nil {
 		log.Fatalf("[main] server error: %v", err)
