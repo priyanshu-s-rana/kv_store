@@ -3,9 +3,11 @@ package store
 import (
 	"fmt"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/priyanshu-s-rana/kv_store/constants"
+	"github.com/priyanshu-s-rana/kv_store/data_type/heap"
 	"github.com/priyanshu-s-rana/kv_store/parser"
 )
 
@@ -203,4 +205,27 @@ func (s *Store) snapshot() {
 	case s.snapResp <- SnapshotResponse{data: snapshotData, err: nil}:
 	default:
 	}
+}
+
+func (s *Store) keys(args []string) Response {
+	var keys []string
+	keyCount := 1
+	matchKey := args[0]
+	matchFn := keyMatcher(matchKey)
+	for key := range s.data {
+		if matchFn(key) {
+			keys = append(keys, fmt.Sprintf("%d) %s", keyCount, key))
+			keyCount++
+		}
+	}
+
+	return Response{Value: parser.BulkString(strings.Join(keys, "\n"))}
+}
+
+func (s *Store) flushAll() Response {
+	clear(s.data)
+	s.ttls = heap.New[ttlItem](func(a, b ttlItem) bool {
+		return a.expiresAt.Before(b.expiresAt)
+	})
+	return Response{Value: parser.SimpleString(constants.OK)}
 }

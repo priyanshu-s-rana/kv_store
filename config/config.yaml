@@ -1,5 +1,6 @@
 SERVER:
-  PORT: ":5040"
+  HOST: "localhost"
+  PORT: "5040"
 
 SNAPSHOT:
   PATH: "./data/dump.rb"

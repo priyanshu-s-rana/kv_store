@@ -3,6 +3,7 @@ package store
 import (
 	"fmt"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/priyanshu-s-rana/kv_store/constants"
@@ -40,6 +41,25 @@ func set_with_modifiers(s *Store, args []string, e *entry) (Response, bool) {
 	}
 
 	return Response{Value: parser.SimpleString(constants.OK)}, true
+}
+
+func keyMatcher(pattern string) func(string) bool {
+	prefix := pattern[0] == '*'
+	suffix := pattern[len(pattern)-1] == '*'
+	switch {
+	case prefix && suffix:
+		if len(pattern) == 1 {
+			return func(key string) bool { return true }
+		}
+		mid := pattern[1 : len(pattern)-1]
+		return func(key string) bool { return strings.Contains(key, mid) }
+	case prefix:
+		return func(key string) bool { return strings.HasSuffix(key, pattern[1:]) }
+	case suffix:
+		return func(key string) bool { return strings.HasPrefix(key, pattern[:len(pattern)-1]) }
+	default:
+		return func(key string) bool { return key == pattern }
+	}
 }
 
 func (s *Store) _default(cmd Command) Response {

@@ -4,6 +4,7 @@ import "time"
 
 type CFG struct {
 	Server struct {
+		Host string `mapstructure:"host"`
 		Port string `mapstructure:"port"`
 	} `mapstructure:"server"`
 	Snapshot struct {

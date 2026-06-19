@@ -13,4 +13,6 @@ const (
 	Subscribe CmdName = "SUBSCRIBE"
 	Publish   CmdName = "PUBLISH"
 	Snapshot  CmdName = "_SNAPSHOT"
+	FlushAll  CmdName = "FLUSHALL"
+	Keys      CmdName = "KEYS"
 )

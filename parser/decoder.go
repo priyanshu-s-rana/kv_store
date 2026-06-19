@@ -1,0 +1,113 @@
+package parser
+
+import (
+	"bufio"
+	"bytes"
+	"strconv"
+	"strings"
+)
+
+// DecodeArray parses a RESP array and returns its string elements.
+// @returns []string: the decoded elements in order.
+// @returns nil: if data is not a valid RESP array.
+func DecodeArray(reader *bufio.Reader, data []byte) string {
+	var p *Parser
+	if reader != nil {
+		p = New(reader)
+	} else {
+		p = New(bytes.NewReader(data))
+	}
+
+	line, err := p.readLine()
+	if err != nil {
+		return "(error) " + err.Error()
+	}
+	if len(line) == 0 || line[0] != '*' {
+		return ""
+	}
+
+	n, err := strconv.Atoi(line[1:])
+	if err != nil {
+		return "(error) " + err.Error()
+	}
+	if n <= 0 {
+		return ""
+	}
+
+	parts := make([]string, n)
+	for i := range n {
+		parts[i], err = p.readBulkString()
+		if err != nil {
+			return "(error) " + err.Error()
+		}
+	}
+
+	return strings.Join(parts, " ")
+}
+
+// decodeSingleLine is a helper function to decode RESP simple strings and errors by stripping the first character and the trailing '\r\n'.
+// @returns string: the decoded string without the leading character and trailing '\r\n', or an empty string if data is too short.
+func decodeSingleLine(reader *bufio.Reader, data []byte) string {
+	if reader != nil {
+		p := New(reader)
+		line, err := p.readLine()
+		if len(line) < 2 || err != nil {
+			return ""
+		}
+
+		return line[1:]
+	}
+
+	if len(data) < 3 {
+		return ""
+	}
+	return string(data[1 : len(data)-2])
+}
+
+// DecodeSimpleString parses a RESP simple string and returns its value.
+// @returns string: the decoded simple string without the leading '+' and trailing '\r\n'.
+func DecodeSimpleString(reader *bufio.Reader, data []byte) string {
+	return decodeSingleLine(reader, data)
+}
+
+// DecodeError parses a RESP error and returns its message.
+// @returns string: the decoded error message without the leading '-' and trailing '\r\n'.
+func DecodeError(reader *bufio.Reader, data []byte) string {
+	return decodeSingleLine(reader, data)
+}
+
+// DecodeInteger parses a RESP integer and returns its string representation.
+// @returns string: the decoded integer as a string without the leading ':' and trailing '\r\n'.
+func DecodeInteger(reader *bufio.Reader, data []byte) string {
+	return decodeSingleLine(reader, data)
+}
+
+// DecodeBulkString parses a RESP bulk string and returns its value.
+// @returns string: the decoded bulk string without the leading '$' and trailing '\r\n',
+// @returns "nil" if the bulk string is null.
+func DecodeBulkString(reader *bufio.Reader, data []byte) string {
+	if reader != nil {
+		p := New(reader)
+		line, err := p.readBulkString()
+		if err != nil {
+			return "(error) " + err.Error()
+		}
+		if line == "" {
+			return "nil"
+		}
+		return line
+	}
+
+	if string(data) == "$-1\r\n" {
+		return "nil"
+	}
+
+	p := New(bytes.NewReader(data))
+
+	bulkString, err := p.readBulkString()
+	if err != nil {
+		return "nil"
+	}
+
+	return bulkString
+}
