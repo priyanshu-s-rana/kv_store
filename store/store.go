@@ -6,6 +6,7 @@ import (
 
 	"github.com/priyanshu-s-rana/kv_store/constants"
 	"github.com/priyanshu-s-rana/kv_store/data_type/heap"
+	"github.com/priyanshu-s-rana/kv_store/lru"
 	"github.com/priyanshu-s-rana/kv_store/models"
 )
 
@@ -38,23 +39,28 @@ type ttlItem struct {
 }
 
 type Store struct {
-	data     map[string]*entry        // Real data of key value
-	cmdChan  chan Command             // Command channel which Event Loop interacts with
-	ttls     *heap.Heap[ttlItem]      // TTL heap
-	pubsub   map[string][]chan []byte // Pubsub for different Clients
-	mut      sync.Mutex               // Mutex for pubsub
-	snapResp chan SnapshotResponse    // Channel for snapshot responses
+	data          map[string]*entry        // Real data of key value
+	cmdChan       chan Command             // Command channel which Event Loop interacts with
+	ttls          *heap.Heap[ttlItem]      // TTL heap
+	pubsub        map[string][]chan []byte // Pubsub for different Clients
+	mut           sync.Mutex               // Mutex for pubsub
+	snapResp      chan SnapshotResponse    // Channel for snapshot responses
+	lru           *lru.LRU                 // LRU key eviction when memory is full
+	memoryProfile *MemoryProfile           // Memory Profiling to keep track of size
 }
 
-func New() *Store {
+// New creates and returns a Store with its event loop and TTL eviction goroutines running.
+func New(memorySize int64) *Store {
 	store := &Store{
 		data:    make(map[string]*entry),
 		cmdChan: make(chan Command),
 		ttls: heap.New[ttlItem](func(a, b ttlItem) bool {
 			return a.expiresAt.Before(b.expiresAt)
 		}),
-		pubsub:   make(map[string][]chan []byte),
-		snapResp: make(chan SnapshotResponse, 1),
+		pubsub:        make(map[string][]chan []byte),
+		snapResp:      make(chan SnapshotResponse, 1),
+		lru:           lru.New(),
+		memoryProfile: NewMemProfile(memorySize),
 	}
 
 	go store.eventLoop()
@@ -63,10 +69,12 @@ func New() *Store {
 	return store
 }
 
+// CmdChan returns a write-only channel for submitting commands to the event loop.
 func (store *Store) CmdChan() chan<- Command {
 	return store.cmdChan
 }
 
+// eventLoop processes commands from cmdChan sequentially, ensuring single-threaded data access.
 func (store *Store) eventLoop() {
 	for cmd := range store.cmdChan {
 		var resp Response
@@ -89,6 +97,8 @@ func (store *Store) eventLoop() {
 			resp = store.keys(cmd.Args)
 		case constants.FlushAll:
 			resp = store.flushAll()
+		case constants.MemoryStats:
+			resp = store.memoryStats()
 		case constants.EVICT:
 			store.evict()
 			continue
@@ -106,6 +116,7 @@ func (store *Store) eventLoop() {
 	}
 }
 
+// ttlEviction ticks every second and sends an internal EVICT command to prune expired keys.
 func (store *Store) ttlEviction() {
 	ticker := time.NewTicker(1 * time.Second)
 	defer ticker.Stop()

@@ -5,3 +5,6 @@ SERVER:
 SNAPSHOT:
   PATH: "./data/dump.rb"
   INTERVAL: 60s
+
+MEMORY:
+  MAX_SIZE: 0 # bytes, 0 = unlimited

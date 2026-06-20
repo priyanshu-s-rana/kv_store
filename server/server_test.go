@@ -15,7 +15,7 @@ import (
 // t.Cleanup closes the client connection.
 func testConn(t *testing.T) (net.Conn, *bufio.Reader) {
 	t.Helper()
-	st := store.New()
+	st := store.New(0)
 	s := New("", st)
 	client, srv := net.Pipe()
 	t.Cleanup(func() { client.Close() })
@@ -195,7 +195,7 @@ func TestClientDisconnect(t *testing.T) {
 // ---- PUB/SUB ----
 
 func TestSubscribeAndPublish(t *testing.T) {
-	st := store.New()
+	st := store.New(0)
 	s := New("", st)
 
 	subConn, subSrv := net.Pipe()

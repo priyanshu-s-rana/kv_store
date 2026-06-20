@@ -189,7 +189,7 @@ func TestSaveAndLoadRoundTrip(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "snap.gob")
 
-	s := New()
+	s := New(0)
 	send(t, s, constants.Set, "k1", "v1")
 	send(t, s, constants.Set, "k2", "v2", constants.EX, "100")
 
@@ -223,7 +223,7 @@ func TestSaveToDiskAtomicNoTempLeftover(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "snap.gob")
 
-	s := New()
+	s := New(0)
 	send(t, s, constants.Set, "k", "v")
 
 	if err := s.SaveToDisk(path); err != nil {
@@ -243,7 +243,7 @@ func TestSaveToDiskEmptyStore(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "snap.gob")
 
-	s := New()
+	s := New(0)
 	if err := s.SaveToDisk(path); err != nil {
 		t.Fatalf("SaveToDisk: %v", err)
 	}
@@ -254,6 +254,97 @@ func TestSaveToDiskEmptyStore(t *testing.T) {
 	}
 	if len(s2.data) != 0 {
 		t.Errorf("data len = %d, want 0", len(s2.data))
+	}
+}
+
+// ---- LoadFromDisk memory profile ----
+
+// Verifies that loading a snapshot charges keyBytes, valueBytes, lruBytes,
+// and ttlBytes on the memory profile.
+func TestLoadFromDiskChargesMemoryProfile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "snap.gob")
+
+	writeSnapshot(t, path, map[string]snapshotEntry{
+		"foo": {Value: []byte("bar")},
+		"baz": {Value: []byte("qux"), Expiry: time.Now().Add(time.Hour)},
+	})
+
+	s := newTestStore()
+	if err := s.LoadFromDisk(path); err != nil {
+		t.Fatalf("LoadFromDisk: %v", err)
+	}
+
+	mp := s.memoryProfile
+	if mp.keyCount != 2 {
+		t.Errorf("keyCount = %d, want 2", mp.keyCount)
+	}
+	if mp.keyBytes <= 0 {
+		t.Errorf("keyBytes = %d, want > 0", mp.keyBytes)
+	}
+	if mp.valueBytes <= 0 {
+		t.Errorf("valueBytes = %d, want > 0", mp.valueBytes)
+	}
+	if mp.lruBytes <= 0 {
+		t.Errorf("lruBytes = %d, want > 0", mp.lruBytes)
+	}
+	// "baz" carries a TTL so ttlBytes must be non-zero.
+	if mp.ttlBytes <= 0 {
+		t.Errorf("ttlBytes = %d, want > 0 (baz has TTL)", mp.ttlBytes)
+	}
+}
+
+// Verifies that a key with no expiry does not charge ttlBytes.
+func TestLoadFromDiskNoTTLChargeForPlainKey(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "snap.gob")
+
+	writeSnapshot(t, path, map[string]snapshotEntry{
+		"plain": {Value: []byte("v")},
+	})
+
+	s := newTestStore()
+	if err := s.LoadFromDisk(path); err != nil {
+		t.Fatalf("LoadFromDisk: %v", err)
+	}
+
+	if s.memoryProfile.ttlBytes != 0 {
+		t.Errorf("ttlBytes = %d, want 0 for key with no TTL", s.memoryProfile.ttlBytes)
+	}
+}
+
+// Verifies makeRoom is called after loading: when the snapshot exceeds maxBytes,
+// the least-recently-loaded keys are evicted until the store is under the limit.
+//
+// currentMemorySize includes FIXED_OVERHEAD (136 B). Each single-char key + value adds:
+//
+//	STRING_OVERHEAD(16)+1 + ENTRY_OVERHEAD(48)+1 + LRU_NODE_OVERHEAD(32)+1 = 99 bytes
+//
+// One key  → 136+99 = 235 B
+// Two keys → 136+198 = 334 B
+// maxBytes=250 fits one key but not two, so one key must be evicted.
+func TestLoadFromDiskEvictsWhenOverLimit(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "snap.gob")
+
+	writeSnapshot(t, path, map[string]snapshotEntry{
+		"a": {Value: []byte("1")},
+		"b": {Value: []byte("2")},
+	})
+
+	s := newTestStore()
+	s.memoryProfile = NewMemProfile(250)
+
+	if err := s.LoadFromDisk(path); err != nil {
+		t.Fatalf("LoadFromDisk: %v", err)
+	}
+
+	if len(s.data) != 1 {
+		t.Errorf("data len = %d, want 1 (one key evicted to stay under limit)", len(s.data))
+	}
+	if s.memoryProfile.isOverLimit() {
+		t.Errorf("store should be under memory limit after makeRoom; currentSize = %d, max = %d",
+			s.memoryProfile.currentMemorySize(), s.memoryProfile.maxBytes)
 	}
 }
 
@@ -272,7 +363,7 @@ func TestStartSnapshotting(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "snap.gob")
 
-	s := New()
+	s := New(0)
 	send(t, s, constants.Set, "k", "v")
 
 	s.StartSnapshotting(ctx, path, 50*time.Millisecond)

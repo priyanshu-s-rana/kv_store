@@ -3,3 +3,5 @@ data/
 
 # build output
 kv_store
+kv-cli
+kv-server
