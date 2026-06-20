@@ -12,4 +12,7 @@ type CFG struct {
 		Path     string        `mapstructure:"path"`
 		Interval time.Duration `mapstructure:"interval"`
 	} `mapstructure:"snapshot"`
+	Memory struct {
+		MaxSize int64 `mapstructure:"max_size"`
+	} `mapstructure:"memory"`
 }

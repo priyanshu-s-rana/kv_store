@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"strings"
@@ -25,10 +26,7 @@ func main() {
 	port := utils.ResolveStringFallbacks(*portFlag, config.CONFIG.Server.Port, "5040")
 	addr := host + ":" + port
 
-	conn, err := net.Dial("tcp", addr)
-	if err != nil {
-		log.Fatalf("[cli] error connecting to server at: %s, err: %v", addr, err)
-	}
+	conn, serverReader := mustConnect(addr)
 	defer conn.Close()
 
 	rl, err := readline.NewEx(&readline.Config{
@@ -40,11 +38,9 @@ func main() {
 	}
 	defer rl.Close()
 
-	serverReader := bufio.NewReader(conn)
 	for {
 		command, err := rl.Readline()
-		if err != nil {
-			fmt.Println("\nBye!")
+		if isInterupted(err, rl) {
 			return
 		}
 
@@ -52,19 +48,97 @@ func main() {
 		if trimmed == "" {
 			continue
 		}
-		if trimmed == "exit" || trimmed == "quit" {
-			fmt.Println("Bye!")
+		if isExitCmd(trimmed) {
+			fmt.Fprintln(rl.Stdout(), "Bye!")
 			return
 		}
 
-		conn.Write(parser.Array(strings.Fields(trimmed)...))
+		fields := strings.Fields(trimmed)
 
-		serverResponse, err := readServerResponse(serverReader)
-		if err != nil {
-			fmt.Println("Error: " + err.Error())
+		if strings.ToUpper(fields[0]) == "SUBSCRIBE" {
+			enterSubscribeMode(fields, rl, addr)
 			continue
 		}
-		fmt.Println(serverResponse)
+
+		conn.Write(parser.Array(fields...))
+
+		resp, err := readServerResponse(serverReader)
+		if err != nil {
+			if resp != "" {
+				fmt.Fprintln(rl.Stdout(), resp) // server-side RESP error
+			} else {
+				fmt.Fprintln(rl.Stdout(), "Error:", err) // connection error
+			}
+			continue
+		}
+
+		fmt.Fprintln(rl.Stdout(), resp)
+	}
+}
+
+// isInterupted reports whether a readline error means the session should end.
+func isInterupted(err error, rl *readline.Instance) bool {
+	if err != nil {
+		fmt.Fprintln(rl.Stdout(), "\nBye!")
+		return true
+	}
+	return false
+}
+
+// isExitCmd reports whether the user typed an explicit exit command.
+func isExitCmd(cmd string) bool {
+	return cmd == "exit" || cmd == "quit"
+}
+
+// enterSubscribeMode opens a dedicated connection for the subscription so the
+// caller's main connection is never touched. It sends the SUBSCRIBE command,
+// reads the first response (confirmation or error), and if successful starts a
+// goroutine to print push messages until Ctrl+C closes the dedicated connection.
+func enterSubscribeMode(fields []string, rl *readline.Instance, addr string) {
+	subConn, subReader := mustConnect(addr)
+	defer subConn.Close()
+
+	subConn.Write(parser.Array(fields...))
+
+	resp, err := readServerResponse(subReader)
+	fmt.Fprintln(rl.Stdout(), resp)
+	if err != nil {
+		return
+	}
+
+	rl.SetPrompt("=> ")
+	go readLoop(subReader, rl.Stdout())
+
+	for {
+		_, err := rl.Readline()
+		if err == readline.ErrInterrupt || err == io.EOF {
+			break
+		}
+	}
+
+	fmt.Fprintln(rl.Stdout(), "unsubscribed")
+	rl.SetPrompt(fmt.Sprintf("%s> ", addr))
+}
+
+// mustConnect dials addr and returns the connection with a fresh buffered reader.
+// Calls log.Fatalf on failure since the CLI cannot function without a server connection.
+func mustConnect(addr string) (net.Conn, *bufio.Reader) {
+	conn, err := net.Dial("tcp", addr)
+	if err != nil {
+		log.Fatalf("[cli] connect to %s failed: %v", addr, err)
+	}
+	return conn, bufio.NewReader(conn)
+}
+
+// readLoop drains reader and writes each decoded RESP message to out until an error occurs.
+// Intended to run as a goroutine during subscribe mode; exits when the connection closes.
+func readLoop(reader *bufio.Reader, out io.Writer) {
+	for {
+		msg, err := readServerResponse(reader)
+		if err != nil {
+			return
+		}
+		fmt.Fprintln(out, msg)
 	}
 }
 
@@ -79,7 +153,8 @@ func readServerResponse(serverReader *bufio.Reader) (string, error) {
 	case '+':
 		return parser.DecodeSimpleString(serverReader, data), nil
 	case '-':
-		return parser.DecodeError(serverReader, data), nil
+		msg := parser.DecodeError(serverReader, data)
+		return msg, fmt.Errorf("%s", msg)
 	case ':':
 		return parser.DecodeInteger(serverReader, data), nil
 	case '$':

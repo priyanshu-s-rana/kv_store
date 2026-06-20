@@ -44,8 +44,9 @@ func main() {
 
 	snapshotPath := config.CONFIG.Snapshot.Path
 	snapshotInterval := config.CONFIG.Snapshot.Interval
+	memorySize := config.CONFIG.Memory.MaxSize
 
-	store := store.New()
+	store := store.New(memorySize)
 
 	if err := store.LoadFromDisk(snapshotPath); err != nil {
 		log.Printf("[main] warning: failed to load snapshot from disk: %v", err)

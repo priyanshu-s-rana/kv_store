@@ -32,19 +32,14 @@ func (lru *LRU) MoveToFront(key string) {
 	lru.pushFront(node)
 }
 
-// RemoveFromBack evicts the least-recently-used key from the tail of the list.
-// @returns key, true: if an entry was evicted,
+// PeekBack returns the least-recently-used key without removing it.
+// @returns key, true: if an entry exists,
 // @returns "", false: if the cache is empty.
-func (lru *LRU) RemoveFromBack() (string, bool) {
-	if lru.tail != nil {
-		node := lru.tail
-		lru.unlink(node)
-
-		delete(lru.lruIndex, node.GetData())
-		return node.GetData(), true
+func (lru *LRU) PeekBack() (string, bool) {
+	if lru.tail == nil {
+		return "", false
 	}
-
-	return "", false
+	return lru.tail.GetData(), true
 }
 
 // Remove deletes a specific key from the cache without evicting by recency order.
@@ -54,6 +49,15 @@ func (lru *LRU) Remove(key string) {
 		lru.unlink(node)
 		delete(lru.lruIndex, key)
 	}
+}
+
+// GetNode returns the internal list node for key, or nil if the key is not tracked.
+func (lru *LRU) GetNode(key string) *linkedList.List[string] {
+	if value, ok := lru.lruIndex[key]; ok {
+		return value
+	}
+
+	return nil
 }
 
 // getOrCreate returns the existing node for key, or allocates and indexes a new one.

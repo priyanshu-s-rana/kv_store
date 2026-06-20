@@ -75,7 +75,7 @@ func TestEntryHasExpiry(t *testing.T) {
 // ---- New ----
 
 func TestNewInitializesFields(t *testing.T) {
-	s := New()
+	s := New(0)
 
 	if s == nil {
 		t.Fatalf("New() returned nil")
@@ -92,10 +92,16 @@ func TestNewInitializesFields(t *testing.T) {
 	if s.pubsub == nil {
 		t.Errorf("pubsub map not initialized")
 	}
+	if s.lru == nil {
+		t.Errorf("lru not initialized")
+	}
+	if s.memoryProfile == nil {
+		t.Errorf("memoryProfile not initialized")
+	}
 }
 
 func TestNewStartsEventLoop(t *testing.T) {
-	s := New()
+	s := New(0)
 
 	// If the event loop wasn't running, this send would block past the timeout.
 	resp := send(t, s, constants.Ping)
@@ -108,7 +114,7 @@ func TestNewStartsEventLoop(t *testing.T) {
 // ---- CmdChan ----
 
 func TestCmdChanReturnsSendOnly(t *testing.T) {
-	s := New()
+	s := New(0)
 	ch := s.CmdChan()
 	if ch == nil {
 		t.Errorf("CmdChan() returned nil")
@@ -124,7 +130,7 @@ func TestCmdChanReturnsSendOnly(t *testing.T) {
 // ---- eventLoop dispatch ----
 
 func TestEventLoopDispatchesPing(t *testing.T) {
-	s := New()
+	s := New(0)
 	resp := send(t, s, constants.Ping)
 	want := respSimple(constants.PONG)
 	if !bytes.Equal(resp.Value, []byte(want)) {
@@ -133,7 +139,7 @@ func TestEventLoopDispatchesPing(t *testing.T) {
 }
 
 func TestEventLoopDispatchesSetGet(t *testing.T) {
-	s := New()
+	s := New(0)
 
 	setResp := send(t, s, constants.Set, "k", "v")
 	if !bytes.Equal(setResp.Value, []byte(respSimple(constants.OK))) {
@@ -148,7 +154,7 @@ func TestEventLoopDispatchesSetGet(t *testing.T) {
 }
 
 func TestEventLoopDispatchesDel(t *testing.T) {
-	s := New()
+	s := New(0)
 	send(t, s, constants.Set, "k", "v")
 
 	delResp := send(t, s, constants.Del, "k")
@@ -163,7 +169,7 @@ func TestEventLoopDispatchesDel(t *testing.T) {
 }
 
 func TestEventLoopDispatchesExpireAndTTL(t *testing.T) {
-	s := New()
+	s := New(0)
 	send(t, s, constants.Set, "k", "v")
 	send(t, s, constants.Expire, "k", "30")
 
@@ -176,7 +182,7 @@ func TestEventLoopDispatchesExpireAndTTL(t *testing.T) {
 }
 
 func TestEventLoopUnknownCommand(t *testing.T) {
-	s := New()
+	s := New(0)
 	resp := send(t, s, "FAKECMD")
 
 	if !bytes.Contains(resp.Value, []byte("FAKECMD")) {
@@ -184,6 +190,56 @@ func TestEventLoopUnknownCommand(t *testing.T) {
 	}
 	if !bytes.HasPrefix(resp.Value, []byte("-ERR")) {
 		t.Errorf("unknown command response = %q, should start with -ERR", resp.Value)
+	}
+}
+
+func TestEventLoopDispatchesKeys(t *testing.T) {
+	s := New(0)
+	send(t, s, constants.Set, "foo", "1")
+	send(t, s, constants.Set, "bar", "2")
+
+	resp := send(t, s, constants.Keys, "*")
+	if !bytes.Contains(resp.Value, []byte("foo")) {
+		t.Errorf("KEYS * missing 'foo': %q", resp.Value)
+	}
+	if !bytes.Contains(resp.Value, []byte("bar")) {
+		t.Errorf("KEYS * missing 'bar': %q", resp.Value)
+	}
+}
+
+func TestEventLoopDispatchesFlushAll(t *testing.T) {
+	s := New(0)
+	send(t, s, constants.Set, "k1", "v1")
+	send(t, s, constants.Set, "k2", "v2")
+
+	resp := send(t, s, constants.FlushAll)
+	if !bytes.Equal(resp.Value, []byte(respSimple(constants.OK))) {
+		t.Errorf("FLUSHALL = %q, want OK", resp.Value)
+	}
+
+	getResp := send(t, s, constants.Get, "k1")
+	if !bytes.Equal(getResp.Value, []byte(respNil)) {
+		t.Errorf("GET after FLUSHALL = %q, want nil", getResp.Value)
+	}
+}
+
+func TestEventLoopDispatchesMemoryStats(t *testing.T) {
+	s := New(0)
+	send(t, s, constants.Set, "k", "v")
+
+	resp := send(t, s, constants.MemoryStats)
+	if !bytes.HasPrefix(resp.Value, []byte("$")) {
+		t.Errorf("MEMORY STATS response = %q, want RESP bulk string", resp.Value)
+	}
+	if !bytes.Contains(resp.Value, []byte("currentSize")) {
+		t.Errorf("MEMORY STATS missing 'currentSize': %q", resp.Value)
+	}
+}
+
+func TestNewWithMemoryLimit(t *testing.T) {
+	s := New(1024)
+	if s.memoryProfile.maxBytes != 1024 {
+		t.Errorf("maxBytes = %d, want 1024", s.memoryProfile.maxBytes)
 	}
 }
 
@@ -195,7 +251,7 @@ func TestTTLCountdown(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping TTL countdown test in -short mode")
 	}
-	s := New()
+	s := New(0)
 	send(t, s, constants.Set, "countdown", "v", constants.EX, "10")
 
 	for tick := range 13 {
@@ -212,7 +268,7 @@ func TestTTLEvictionRemovesExpiredKey(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping eviction integration test in -short mode")
 	}
-	s := New()
+	s := New(0)
 	send(t, s, constants.Set, "ephemeral", "v", constants.EX, "1")
 
 	// Key alive immediately
@@ -233,7 +289,7 @@ func TestTTLEvictionRemovesExpiredKey(t *testing.T) {
 // ---- Non-blocking response send ----
 
 func TestEventLoopDoesNotBlockOnUnreadResponse(t *testing.T) {
-	s := New()
+	s := New(0)
 
 	// Send a command with a buffered chan but never read it.
 	// The event loop's `select { case Resp <- resp: default: }` should drop silently.

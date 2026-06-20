@@ -106,14 +106,20 @@ func (s *Store) LoadFromDisk(path string) error {
 		if se.hasExpiry() && se.isExpired() {
 			continue
 		}
-		s.data[key] = &entry{
+		e := &entry{
 			value:  se.Value,
 			expiry: se.Expiry,
 		}
+		var item *ttlItem
 		if se.hasExpiry() {
-			s.ttls.Push(ttlItem{key: key, expiresAt: se.Expiry})
+			t := ttlItem{key: key, expiresAt: se.Expiry}
+			s.ttls.Push(t)
+			item = &t
 		}
+		setKey(s, key, e, item)
 	}
+
+	makeRoom(s)
 
 	log.Printf(constants.SNAPSHOT_LOADED, len(snapshot), path)
 	return nil

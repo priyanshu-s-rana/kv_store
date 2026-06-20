@@ -8,6 +8,7 @@ import (
 
 	"github.com/priyanshu-s-rana/kv_store/constants"
 	"github.com/priyanshu-s-rana/kv_store/data_type/heap"
+	"github.com/priyanshu-s-rana/kv_store/lru"
 	"github.com/priyanshu-s-rana/kv_store/parser"
 )
 
@@ -31,10 +32,11 @@ func (s *Store) get(args []string) Response {
 	}
 
 	if e.isExpired() {
-		delete(s.data, key)
+		deleteKey(s, key)
 		return Response{Value: parser.NullBulkString()}
 	}
 
+	s.lru.MoveToFront(key)
 	return Response{Value: parser.BulkString(string(e.value))}
 }
 
@@ -48,15 +50,16 @@ func (s *Store) set(args []string) Response {
 	if len(args) < 2 {
 		return Response{Value: parser.Error(fmt.Sprintf(constants.WRONG_NUM_ARGS, "SET"))}
 	}
-	key, value := args[0], args[1]
+	value := args[1]
 	e := entry{value: []byte(value)}
 
-	resp, ok := set_with_modifiers(s, args, &e)
+	resp, ok := setWithModifiers(s, args, &e)
 	if !ok {
 		return resp
 	}
 
-	s.data[key] = &e
+	makeRoom(s)
+
 	return Response{Value: parser.SimpleString(constants.OK)}
 }
 
@@ -69,12 +72,11 @@ func (s *Store) del(args []string) Response {
 	}
 
 	key := args[0]
-	_, ok := s.data[key]
-	if !ok {
+	if _, ok := s.data[key]; !ok {
 		return Response{Value: parser.Integer(constants.ZERO)}
 	}
 
-	delete(s.data, key)
+	deleteKey(s, key)
 	s.publish([]string{"lock-released:" + key, "released"})
 	return Response{Value: parser.Integer(constants.ONE)}
 }
@@ -99,8 +101,10 @@ func (s *Store) expire(args []string) Response {
 	}
 
 	e.expiry = time.Now().Add(time.Duration(secs) * time.Second)
-	s.ttls.Push(ttlItem{key: key, expiresAt: e.expiry})
-
+	item := ttlItem{key: key, expiresAt: e.expiry}
+	s.ttls.Push(item)
+	s.memoryProfile.recordTTLSize(&item)
+	makeRoom(s)
 	return Response{Value: parser.Integer(constants.ONE)}
 }
 
@@ -134,8 +138,14 @@ func (s *Store) Subscribe(topic string) chan []byte {
 	ch := make(chan []byte, 16)
 
 	s.mut.Lock()
+	isNewTopic := len(s.pubsub[topic]) == 0
 	s.pubsub[topic] = append(s.pubsub[topic], ch)
 	s.mut.Unlock()
+
+	if isNewTopic {
+		s.memoryProfile.recordPubSubTopicSize(topic)
+	}
+	s.memoryProfile.recordPubSubSubscriber()
 
 	return ch
 }
@@ -145,14 +155,20 @@ func (s *Store) Unsubscribe(topic string, ch chan []byte) {
 	s.mut.Lock()
 
 	subs := s.pubsub[topic]
-	for i, sub_chan := range subs {
-		if sub_chan == ch {
+	for i, subChan := range subs {
+		if subChan == ch {
 			s.pubsub[topic] = append(subs[:i], subs[i+1:]...)
 			break
 		}
 	}
 
+	isTopicEmpty := len(s.pubsub[topic]) == 0
 	s.mut.Unlock()
+
+	if isTopicEmpty {
+		s.memoryProfile.recordPubSubTopicRemove(topic)
+	}
+	s.memoryProfile.recordPubSubSubscriberRemove()
 }
 
 // PUBLISH command sends a message to all subscribers of the given topic.
@@ -162,7 +178,7 @@ func (s *Store) publish(args []string) Response {
 		return Response{Value: parser.Error(fmt.Sprintf(constants.WRONG_NUM_ARGS, "PUBLISH"))}
 	}
 
-	topic, message := args[0], args[1]
+	topic, message := args[0], strings.Join(args[1:], " ")
 
 	s.mut.Lock()
 	subs := make([]chan []byte, len(s.pubsub[topic]))
@@ -170,9 +186,9 @@ func (s *Store) publish(args []string) Response {
 	s.mut.Unlock()
 
 	delivered := 0
-	for _, sub_chan := range subs {
+	for _, subChan := range subs {
 		select {
-		case sub_chan <- []byte(message):
+		case subChan <- []byte(message):
 			delivered++
 		default:
 		}
@@ -189,9 +205,11 @@ func (s *Store) evict() {
 		if !ok || item.expiresAt.After(now) {
 			break
 		}
-		s.ttls.Pop()
+		if popped, ok := s.ttls.Pop(); ok {
+			s.memoryProfile.recordTTLRemove(&popped)
+		}
 		if e, ok := s.data[item.key]; ok && e.isExpired() {
-			delete(s.data, item.key)
+			deleteKey(s, item.key)
 			s.publish([]string{"lock-released:" + item.key, "released"})
 		}
 	}
@@ -216,10 +234,12 @@ func (s *Store) snapshot() {
 // KEYS command returns all keys matching the given glob-style pattern.
 // @returns bulk string with keys numbered and newline-separated.
 func (s *Store) keys(args []string) Response {
+	if len(args) < 1 {
+		return Response{Value: parser.Error(fmt.Sprintf(constants.WRONG_NUM_ARGS, "KEYS"))}
+	}
 	var keys []string
 	keyCount := 1
-	matchKey := args[0]
-	matchFn := keyMatcher(matchKey)
+	matchFn := keyMatcher(args[0])
 	for key := range s.data {
 		if matchFn(key) {
 			keys = append(keys, fmt.Sprintf("%d) %s", keyCount, key))
@@ -230,12 +250,19 @@ func (s *Store) keys(args []string) Response {
 	return Response{Value: parser.BulkString(strings.Join(keys, "\n"))}
 }
 
-// FLUSHALL command deletes all keys and resets the TTL heap.
+// FLUSHALL command deletes all keys and resets the TTL heap and LRU.
 // @returns OK: always.
 func (s *Store) flushAll() Response {
 	clear(s.data)
 	s.ttls = heap.New[ttlItem](func(a, b ttlItem) bool {
 		return a.expiresAt.Before(b.expiresAt)
 	})
+	s.lru = lru.New()
+	s.memoryProfile.resetAll()
 	return Response{Value: parser.SimpleString(constants.OK)}
+}
+
+// MEMORY STATS command returns a flat array of memory metric key-value pairs.
+func (s *Store) memoryStats() Response {
+	return Response{Value: parser.BulkString(s.memoryProfile.getStats())}
 }

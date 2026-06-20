@@ -9,6 +9,7 @@ import (
 
 	"github.com/priyanshu-s-rana/kv_store/constants"
 	"github.com/priyanshu-s-rana/kv_store/data_type/heap"
+	"github.com/priyanshu-s-rana/kv_store/lru"
 )
 
 // newTestStore builds a Store without starting eventLoop/eviction goroutines,
@@ -19,7 +20,9 @@ func newTestStore() *Store {
 		ttls: heap.New[ttlItem](func(a, b ttlItem) bool {
 			return a.expiresAt.Before(b.expiresAt)
 		}),
-		pubsub: make(map[string][]chan []byte),
+		pubsub:        make(map[string][]chan []byte),
+		lru:           lru.New(),
+		memoryProfile: NewMemProfile(0),
 	}
 }
 
@@ -78,6 +81,23 @@ func TestGetWrongArgs(t *testing.T) {
 	resp := s.get([]string{})
 	want := respError(fmt.Sprintf(constants.WRONG_NUM_ARGS, "GET"))
 	assertValue(t, resp, want)
+}
+
+func TestGetMovesLRUToFront(t *testing.T) {
+	s := newTestStore()
+	s.set([]string{"a", "1"})
+	s.set([]string{"b", "2"})
+	s.set([]string{"c", "3"}) // LRU order: c(head) → b → a(tail)
+
+	s.get([]string{"a"}) // access "a" → moves to front: a(head) → c → b(tail)
+
+	tail, ok := s.lru.PeekBack()
+	if !ok {
+		t.Fatal("LRU is empty")
+	}
+	if tail != "b" {
+		t.Errorf("tail after GET a = %q, want 'b' (a should have moved to front)", tail)
+	}
 }
 
 // ---- SET ----
@@ -169,6 +189,54 @@ func TestSetEXInvalidSeconds(t *testing.T) {
 	assertValue(t, s2.set([]string{"k", "v", constants.EX, "-5"}), respError(constants.INV_EXPIRY))
 }
 
+func TestSetNXFailureNoMemoryCharge(t *testing.T) {
+	s := newTestStore()
+	s.set([]string{"k", "v1"})
+	before := s.memoryProfile.currentMemorySize()
+
+	s.set([]string{"k", "new", constants.NX}) // NX fails — key exists
+
+	if s.memoryProfile.currentMemorySize() != before {
+		t.Errorf("memory changed after NX failure: before=%d after=%d",
+			before, s.memoryProfile.currentMemorySize())
+	}
+	if s.memoryProfile.keyCount != 1 {
+		t.Errorf("keyCount = %d, want 1 (NX failure should not add a key)", s.memoryProfile.keyCount)
+	}
+}
+
+func TestSetXXValueBytesUpdated(t *testing.T) {
+	s := newTestStore()
+	s.set([]string{"k", "short"})
+	afterFirst := s.memoryProfile.valueBytes
+
+	s.set([]string{"k", "muchlonger", constants.XX})
+
+	expected := afterFirst + int64(len("muchlonger"))-int64(len("short"))
+	if s.memoryProfile.valueBytes != expected {
+		t.Errorf("valueBytes = %d, want %d after XX update", s.memoryProfile.valueBytes, expected)
+	}
+	if s.memoryProfile.keyCount != 1 {
+		t.Errorf("keyCount = %d, want 1 (XX updates, not adds)", s.memoryProfile.keyCount)
+	}
+}
+
+func TestMemoryProfilePlainSetOverwriteNoDoubleCharge(t *testing.T) {
+	s := newTestStore()
+	s.set([]string{"k", "v1"})
+	afterFirst := s.memoryProfile.keyBytes
+	afterFirstCount := s.memoryProfile.keyCount
+
+	s.set([]string{"k", "v2"}) // plain SET on existing key — must not re-charge key overhead
+
+	if s.memoryProfile.keyBytes != afterFirst {
+		t.Errorf("keyBytes changed on plain overwrite: was %d, now %d", afterFirst, s.memoryProfile.keyBytes)
+	}
+	if s.memoryProfile.keyCount != afterFirstCount {
+		t.Errorf("keyCount changed on plain overwrite: was %d, now %d", afterFirstCount, s.memoryProfile.keyCount)
+	}
+}
+
 // ---- DEL ----
 
 func TestDelExists(t *testing.T) {
@@ -242,6 +310,18 @@ func TestExpireSetsTTL(t *testing.T) {
 	}
 	if s.ttls.Len() != 1 {
 		t.Errorf("ttls heap len = %d, want 1", s.ttls.Len())
+	}
+}
+
+func TestExpireChargesMemory(t *testing.T) {
+	s := newTestStore()
+	s.data["k"] = &entry{value: []byte("v")}
+	before := s.memoryProfile.ttlBytes
+
+	s.expire([]string{"k", "30"})
+
+	if s.memoryProfile.ttlBytes <= before {
+		t.Errorf("ttlBytes = %d, want > %d after EXPIRE", s.memoryProfile.ttlBytes, before)
 	}
 }
 
@@ -484,6 +564,27 @@ func TestEvictStopsAtFirstAlive(t *testing.T) {
 	}
 }
 
+func TestEvictDecrementsttlBytes(t *testing.T) {
+	s := newTestStore()
+	now := time.Now()
+
+	s.data["k"] = &entry{value: []byte("v"), expiry: now.Add(-1 * time.Second)}
+	item := ttlItem{key: "k", expiresAt: now.Add(-1 * time.Second)}
+	s.ttls.Push(item)
+	s.memoryProfile.recordTTLSize(&item)
+
+	before := s.memoryProfile.ttlBytes
+	if before == 0 {
+		t.Fatal("ttlBytes should be > 0 before eviction")
+	}
+
+	s.evict()
+
+	if s.memoryProfile.ttlBytes >= before {
+		t.Errorf("ttlBytes not decremented after evict: before=%d after=%d", before, s.memoryProfile.ttlBytes)
+	}
+}
+
 // ---- KEYS ----
 
 func TestKeysExactMatch(t *testing.T) {
@@ -574,6 +675,13 @@ func TestKeysEmptyStore(t *testing.T) {
 	assertValue(t, s.keys([]string{"*"}), respBulk(""))
 }
 
+func TestKeysWrongArgs(t *testing.T) {
+	s := newTestStore()
+	resp := s.keys([]string{})
+	want := respError(fmt.Sprintf(constants.WRONG_NUM_ARGS, "KEYS"))
+	assertValue(t, resp, want)
+}
+
 // ---- FLUSHALL ----
 
 func TestFlushAll(t *testing.T) {
@@ -595,6 +703,332 @@ func TestFlushAll(t *testing.T) {
 func TestFlushAllEmptyStore(t *testing.T) {
 	s := newTestStore()
 	assertValue(t, s.flushAll(), respSimple(constants.OK))
+}
+
+// ---- Memory Profile ----
+
+func TestMemoryProfileNewKeyTracked(t *testing.T) {
+	s := newTestStore()
+	s.set([]string{"key", "value"})
+
+	if s.memoryProfile.keyCount != 1 {
+		t.Errorf("keyCount = %d, want 1", s.memoryProfile.keyCount)
+	}
+	if s.memoryProfile.keyBytes <= 0 {
+		t.Errorf("keyBytes = %d, want > 0", s.memoryProfile.keyBytes)
+	}
+	if s.memoryProfile.valueBytes <= 0 {
+		t.Errorf("valueBytes = %d, want > 0", s.memoryProfile.valueBytes)
+	}
+	if s.memoryProfile.lruBytes <= 0 {
+		t.Errorf("lruBytes = %d, want > 0", s.memoryProfile.lruBytes)
+	}
+}
+
+func TestMemoryProfileUpdateDoesNotDoubleCountLRU(t *testing.T) {
+	s := newTestStore()
+	s.set([]string{"k", "v1"})
+	afterFirst := s.memoryProfile.lruBytes
+
+	s.set([]string{"k", "v2", constants.XX})
+
+	if s.memoryProfile.lruBytes != afterFirst {
+		t.Errorf("lruBytes after XX update = %d, want %d (no double count)", s.memoryProfile.lruBytes, afterFirst)
+	}
+	if s.memoryProfile.keyCount != 1 {
+		t.Errorf("keyCount = %d, want 1 after update", s.memoryProfile.keyCount)
+	}
+}
+
+func TestMemoryProfileSetWithoutEXNoTTLCharge(t *testing.T) {
+	s := newTestStore()
+	s.set([]string{"k", "v"})
+
+	if s.memoryProfile.ttlBytes != 0 {
+		t.Errorf("ttlBytes = %d, want 0 for SET without EX", s.memoryProfile.ttlBytes)
+	}
+}
+
+func TestMemoryProfileSetWithEXChargesTTL(t *testing.T) {
+	s := newTestStore()
+	s.set([]string{"k", "v", constants.EX, "10"})
+
+	if s.memoryProfile.ttlBytes <= 0 {
+		t.Errorf("ttlBytes = %d, want > 0 for SET with EX", s.memoryProfile.ttlBytes)
+	}
+}
+
+func TestMemoryProfileDelDecrementsAll(t *testing.T) {
+	s := newTestStore()
+	s.set([]string{"k", "v"})
+	s.del([]string{"k"})
+
+	if s.memoryProfile.keyCount != 0 {
+		t.Errorf("keyCount = %d, want 0 after DEL", s.memoryProfile.keyCount)
+	}
+	if s.memoryProfile.keyBytes != 0 {
+		t.Errorf("keyBytes = %d, want 0 after DEL", s.memoryProfile.keyBytes)
+	}
+	if s.memoryProfile.lruBytes != 0 {
+		t.Errorf("lruBytes = %d, want 0 after DEL", s.memoryProfile.lruBytes)
+	}
+}
+
+func TestMemoryDelSameKeyTwiceNoNegative(t *testing.T) {
+	s := newTestStore()
+	s.set([]string{"k", "v"})
+	s.del([]string{"k"})
+	s.del([]string{"k"}) // second DEL is a no-op
+
+	if s.memoryProfile.keyBytes < 0 {
+		t.Errorf("keyBytes = %d, went negative on double DEL", s.memoryProfile.keyBytes)
+	}
+	if s.memoryProfile.lruBytes < 0 {
+		t.Errorf("lruBytes = %d, went negative on double DEL", s.memoryProfile.lruBytes)
+	}
+	if s.memoryProfile.keyCount < 0 {
+		t.Errorf("keyCount = %d, went negative on double DEL", s.memoryProfile.keyCount)
+	}
+}
+
+func TestMemoryIsOverLimit(t *testing.T) {
+	s := newTestStore()
+	s.memoryProfile.maxBytes = 1 // tiny limit
+
+	s.set([]string{"k", "v"})
+
+	if !s.memoryProfile.isOverLimit() {
+		t.Errorf("isOverLimit() = false, want true with maxBytes=1")
+	}
+}
+
+func TestMemoryUnlimitedWhenZero(t *testing.T) {
+	s := newTestStore() // maxBytes defaults to 0 = unlimited
+
+	for i := 0; i < 100; i++ {
+		s.set([]string{fmt.Sprintf("k%d", i), "v"})
+	}
+
+	if s.memoryProfile.isOverLimit() {
+		t.Errorf("isOverLimit() = true with maxBytes=0, should always be false")
+	}
+}
+
+func TestMemoryProfileSubscribeTopicChargedOnce(t *testing.T) {
+	s := newTestStore()
+	s.Subscribe("news")
+	afterFirst := s.memoryProfile.pubsubBytes
+
+	s.Subscribe("news")
+	diff := s.memoryProfile.pubsubBytes - afterFirst
+
+	if diff != constants.BYTE_CHANNEL_OVERHEAD {
+		t.Errorf("second subscriber added %d bytes, want %d (chan only, no topic overhead)", diff, constants.BYTE_CHANNEL_OVERHEAD)
+	}
+}
+
+func TestMemoryProfileUnsubscribeFreesTopicOnLastSubscriber(t *testing.T) {
+	s := newTestStore()
+	ch := s.Subscribe("news")
+	s.Unsubscribe("news", ch)
+
+	if s.memoryProfile.pubsubBytes != 0 {
+		t.Errorf("pubsubBytes = %d, want 0 after last subscriber leaves", s.memoryProfile.pubsubBytes)
+	}
+}
+
+func TestMemoryProfileUnsubscribePartialKeepsTopic(t *testing.T) {
+	s := newTestStore()
+	ch1 := s.Subscribe("news")
+	ch2 := s.Subscribe("news")
+	afterBoth := s.memoryProfile.pubsubBytes
+
+	s.Unsubscribe("news", ch1)
+
+	// topic overhead should still be charged — ch2 is still subscribed
+	expected := afterBoth - constants.BYTE_CHANNEL_OVERHEAD
+	if s.memoryProfile.pubsubBytes != expected {
+		t.Errorf("pubsubBytes = %d, want %d (topic kept, one chan removed)", s.memoryProfile.pubsubBytes, expected)
+	}
+	_ = ch2
+}
+
+// ---- FLUSHALL LRU ----
+
+func TestFlushAllClearsLRU(t *testing.T) {
+	s := newTestStore()
+	s.set([]string{"k1", "v1"})
+	s.set([]string{"k2", "v2"})
+
+	s.flushAll()
+
+	if s.lru.GetNode("k1") != nil {
+		t.Errorf("LRU still has k1 after flushAll")
+	}
+	if s.lru.GetNode("k2") != nil {
+		t.Errorf("LRU still has k2 after flushAll")
+	}
+	dynamicSize := s.memoryProfile.keyBytes + s.memoryProfile.valueBytes +
+		s.memoryProfile.lruBytes + s.memoryProfile.ttlBytes + s.memoryProfile.pubsubBytes
+	if dynamicSize != 0 {
+		t.Errorf("memory profile dynamic fields not reset after flushAll, size = %d", dynamicSize)
+	}
+}
+
+// ---- MEMORY STATS ----
+
+// statsBody strips the RESP bulk-string framing and returns the raw stat lines.
+func statsBody(t *testing.T, s *Store) string {
+	t.Helper()
+	raw := string(s.memoryStats().Value)
+	first := strings.Index(raw, "\r\n")
+	if first == -1 {
+		t.Fatalf("memoryStats: not a bulk string: %q", raw)
+	}
+	return raw[first+2 : len(raw)-2]
+}
+
+// assertStat checks that body contains "label: value".
+func assertStat(t *testing.T, body, label, value string) {
+	t.Helper()
+	want := label + ": " + value
+	if !strings.Contains(body, want) {
+		t.Errorf("memoryStats: want %q in:\n%s", want, body)
+	}
+}
+
+func TestMemoryStatsContainsAllLabels(t *testing.T) {
+	body := statsBody(t, newTestStore())
+	for _, label := range []string{
+		"currentSize", "maxSize", "keyCount",
+		"keySize", "valueSize", "ttlSize", "lruSize", "pubsubSize",
+	} {
+		if !strings.Contains(body, label) {
+			t.Errorf("missing label %q in:\n%s", label, body)
+		}
+	}
+}
+
+func TestMemoryStatsEachStatOnOwnLine(t *testing.T) {
+	body := statsBody(t, newTestStore())
+	if lines := strings.Split(body, "\n"); len(lines) != 8 {
+		t.Errorf("expected 8 stat lines, got %d:\n%s", len(lines), body)
+	}
+}
+
+func TestMemoryStatsEmptyStore(t *testing.T) {
+	body := statsBody(t, newTestStore())
+	assertStat(t, body, "keyCount", "0")
+	assertStat(t, body, "keySize", "0 B")
+	assertStat(t, body, "valueSize", "0 B")
+	assertStat(t, body, "ttlSize", "0 B")
+	assertStat(t, body, "lruSize", "0 B")
+	assertStat(t, body, "pubsubSize", "0 B")
+	assertStat(t, body, "maxSize", "0 B")
+}
+
+func TestMemoryStatsExactValuesAfterSet(t *testing.T) {
+	s := newTestStore()
+	s.set([]string{"key", "val"}) // key=3B, value=3B
+
+	expKeySize := fmt.Sprintf("%d B", constants.STRING_OVERHEAD+3)
+	expValSize := fmt.Sprintf("%d B", constants.ENTRY_OVERHEAD+3)
+	expLRUSize := fmt.Sprintf("%d B", constants.LRU_NODE_OVERHEAD+3)
+
+	body := statsBody(t, s)
+	assertStat(t, body, "keyCount", "1")
+	assertStat(t, body, "keySize", expKeySize)
+	assertStat(t, body, "valueSize", expValSize)
+	assertStat(t, body, "lruSize", expLRUSize)
+	assertStat(t, body, "ttlSize", "0 B")
+	assertStat(t, body, "pubsubSize", "0 B")
+}
+
+func TestMemoryStatsKeySizeIncreasesWithEachSet(t *testing.T) {
+	s := newTestStore()
+	s.set([]string{"k1", "v"})
+	body1 := statsBody(t, s)
+
+	s.set([]string{"k2", "v"})
+	body2 := statsBody(t, s)
+
+	assertStat(t, body1, "keyCount", "1")
+	assertStat(t, body2, "keyCount", "2")
+
+	// Each key: STRING_OVERHEAD + len("k1"/"k2") = 16+2 = 18 B
+	perKey := constants.STRING_OVERHEAD + 2
+	assertStat(t, body2, "keySize", fmt.Sprintf("%d B", 2*perKey))
+}
+
+func TestMemoryStatsValueSizeUpdatedOnOverwrite(t *testing.T) {
+	s := newTestStore()
+	s.set([]string{"k", "short"}) // 5 B
+	s.set([]string{"k", "muchlonger"}) // 10 B — overwrite, not new key
+
+	expValSize := constants.ENTRY_OVERHEAD + int64(len("muchlonger"))
+
+	body := statsBody(t, s)
+	assertStat(t, body, "keyCount", "1") // still 1 key
+	assertStat(t, body, "valueSize", fmt.Sprintf("%d B", expValSize))
+}
+
+func TestMemoryStatsDecreasesAfterDel(t *testing.T) {
+	s := newTestStore()
+	s.set([]string{"k", "v"})
+	s.del([]string{"k"})
+
+	body := statsBody(t, s)
+	assertStat(t, body, "keyCount", "0")
+	assertStat(t, body, "keySize", "0 B")
+	assertStat(t, body, "valueSize", "0 B")
+	assertStat(t, body, "lruSize", "0 B")
+}
+
+func TestMemoryStatsTTLSizeAfterEX(t *testing.T) {
+	s := newTestStore()
+	s.set([]string{"mykey", "v", constants.EX, "10"}) // key = 5 B
+
+	expTTL := fmt.Sprintf("%d B", constants.TTL_ITEM_OVERHEAD+int64(len("mykey")))
+
+	body := statsBody(t, s)
+	assertStat(t, body, "ttlSize", expTTL)
+}
+
+func TestMemoryStatsPubSubSizeAfterSubscribe(t *testing.T) {
+	s := newTestStore()
+	s.Subscribe("news") // topic = 4 B
+
+	expPubSub := fmt.Sprintf("%d B",
+		constants.STRING_OVERHEAD+int64(len("news"))+constants.BYTE_CHANNEL_OVERHEAD)
+
+	body := statsBody(t, s)
+	assertStat(t, body, "pubsubSize", expPubSub)
+}
+
+func TestMemoryStatsPubSubSizeDecreasesAfterUnsubscribe(t *testing.T) {
+	s := newTestStore()
+	ch := s.Subscribe("news")
+	s.Unsubscribe("news", ch)
+
+	body := statsBody(t, s)
+	assertStat(t, body, "pubsubSize", "0 B")
+}
+
+func TestMemoryStatsCurrentSizeIsSum(t *testing.T) {
+	s := newTestStore()
+	s.set([]string{"k", "v"})
+
+	body := statsBody(t, s)
+	expCurrent := fmt.Sprintf("%d B", s.memoryProfile.currentMemorySize())
+	assertStat(t, body, "currentSize", expCurrent)
+}
+
+func TestMemoryStatsMaxSizeReflectsLimit(t *testing.T) {
+	s := newTestStore()
+	s.memoryProfile.maxBytes = 4096
+
+	body := statsBody(t, s)
+	assertStat(t, body, "maxSize", "4096 B")
 }
 
 // ---- SNAPSHOT ----

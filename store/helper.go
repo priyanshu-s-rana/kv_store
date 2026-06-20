@@ -13,9 +13,10 @@ import (
 // set_with_modifiers applies NX, XX, and EX modifiers to the entry before it is stored.
 // @returns Response, false: if a modifier condition blocks the write,
 // @returns OK, true: if all modifiers passed.
-func set_with_modifiers(s *Store, args []string, e *entry) (Response, bool) {
+func setWithModifiers(s *Store, args []string, e *entry) (Response, bool) {
 	n := len(args)
 	key := args[0]
+	var item *ttlItem
 	for i := 2; i < n; i++ {
 		// Do not set the key if it already exists when NX is specified.
 		if args[i] == constants.NX {
@@ -39,10 +40,13 @@ func set_with_modifiers(s *Store, args []string, e *entry) (Response, bool) {
 				return Response{Value: parser.Error(constants.INV_EXPIRY)}, false
 			}
 			e.expiry = time.Now().Add(time.Duration(secs) * time.Second)
-			s.ttls.Push(ttlItem{key: key, expiresAt: e.expiry})
+			t := ttlItem{key: key, expiresAt: e.expiry}
+			s.ttls.Push(t)
+			item = &t
 		}
 	}
 
+	setKey(s, key, e, item)
 	return Response{Value: parser.SimpleString(constants.OK)}, true
 }
 
@@ -70,4 +74,49 @@ func keyMatcher(pattern string) func(string) bool {
 // _default returns an unknown command error for any unrecognised command name.
 func (s *Store) _default(cmd Command) Response {
 	return Response{Value: parser.Error(fmt.Sprintf(constants.UNKNOWN_CMD, cmd.Name))}
+}
+
+// deleteKey removes key from data, LRU, and memory profile atomically.
+// The LRU node is fetched before removal so memory accounting is correct.
+func deleteKey(s *Store, key string) {
+	if value, ok := s.data[key]; ok {
+		node := s.lru.GetNode(key) // get before Remove clears lruIndex
+		s.lru.Remove(key)
+		s.memoryProfile.recordDataRemove(key, value)
+		s.memoryProfile.recordLRURemove(node)
+		delete(s.data, key)
+	}
+}
+
+// setKey writes e into the store and updates the memory profile and LRU.
+// If the key is new, full key+value+LRU overhead is charged; if it already
+// exists, only the value-size diff is charged.
+// item is the TTL entry to charge; nil is safe and means no TTL overhead.
+func setKey(s *Store, key string, e *entry, item *ttlItem) {
+	_, isNew := s.data[key]
+	isNew = !isNew
+	if isNew {
+		s.memoryProfile.recordDataSize(key, e)
+	} else {
+		s.memoryProfile.updateValueSize(s.data[key].value, e.value)
+	}
+	s.memoryProfile.recordTTLSize(item)
+	s.lru.MoveToFront(key)
+	if isNew {
+		s.memoryProfile.recordLRUSize(s.lru.GetNode(key))
+	}
+	s.data[key] = e
+}
+
+// makeRoom evicts least-recently-used keys until the store is within maxBytes.
+// Uses PeekBack so deleteKey can fetch the LRU node before removal and keep
+// memory accounting accurate.
+func makeRoom(s *Store) {
+	for s.memoryProfile.isOverLimit() {
+		key, ok := s.lru.PeekBack()
+		if !ok {
+			break
+		}
+		deleteKey(s, key)
+	}
 }

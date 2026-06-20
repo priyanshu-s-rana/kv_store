@@ -103,63 +103,84 @@ func TestMoveToFrontExistingMiddle(t *testing.T) {
 	assertOrder(t, lru, []string{"b", "c", "a"})
 }
 
-// ---- RemoveFromBack ----
+// ---- PeekBack ----
 
-func TestRemoveFromBackEmpty(t *testing.T) {
+func TestPeekBackEmpty(t *testing.T) {
 	lru := New()
-	key, ok := lru.RemoveFromBack()
+	_, ok := lru.PeekBack()
 	if ok {
-		t.Errorf("expected false on empty LRU, got key=%q", key)
+		t.Errorf("expected false on empty LRU")
 	}
 }
 
-func TestRemoveFromBackSingleElement(t *testing.T) {
+func TestPeekBackSingleElement(t *testing.T) {
 	lru := New()
 	lru.MoveToFront("a")
 
-	key, ok := lru.RemoveFromBack()
+	key, ok := lru.PeekBack()
 	if !ok || key != "a" {
-		t.Errorf("RemoveFromBack() = (%q, %v), want (\"a\", true)", key, ok)
-	}
-	if lru.head != nil || lru.tail != nil {
-		t.Errorf("head and tail should be nil after removing last element")
-	}
-	if _, exists := lru.lruIndex["a"]; exists {
-		t.Errorf("'a' should be removed from index")
+		t.Errorf("PeekBack() = (%q, %v), want (\"a\", true)", key, ok)
 	}
 }
 
-func TestRemoveFromBackMultipleElements(t *testing.T) {
+func TestPeekBackMultipleElements(t *testing.T) {
 	lru := New()
 	lru.MoveToFront("a")
 	lru.MoveToFront("b")
-	lru.MoveToFront("c")
+	lru.MoveToFront("c") // order: c -> b -> a
 
-	key, ok := lru.RemoveFromBack()
+	key, ok := lru.PeekBack()
 	if !ok || key != "a" {
-		t.Errorf("RemoveFromBack() = (%q, %v), want (\"a\", true)", key, ok)
+		t.Errorf("PeekBack() = (%q, %v), want (\"a\", true)", key, ok)
 	}
-	assertOrder(t, lru, []string{"c", "b"})
-	if lru.tail.GetData() != "b" {
-		t.Errorf("tail = %q, want 'b'", lru.tail.GetData())
-	}
-	if _, exists := lru.lruIndex["a"]; exists {
-		t.Errorf("'a' should be removed from index")
+	// Node must still be in the list and index after peek.
+	assertOrder(t, lru, []string{"c", "b", "a"})
+	if _, exists := lru.lruIndex["a"]; !exists {
+		t.Errorf("'a' should still be in index after PeekBack")
 	}
 }
 
-func TestRemoveFromBackClearsIndex(t *testing.T) {
+func TestPeekBackIsNonDestructive(t *testing.T) {
 	lru := New()
-	lru.MoveToFront("x")
-	lru.MoveToFront("y")
+	lru.MoveToFront("a")
+	lru.MoveToFront("b")
 
-	lru.RemoveFromBack() // removes "x"
-
-	if _, exists := lru.lruIndex["x"]; exists {
-		t.Errorf("evicted key 'x' still in index")
+	key1, _ := lru.PeekBack()
+	key2, _ := lru.PeekBack()
+	if key1 != key2 {
+		t.Errorf("PeekBack changed the list: first=%q second=%q", key1, key2)
 	}
-	if _, exists := lru.lruIndex["y"]; !exists {
-		t.Errorf("surviving key 'y' missing from index")
+}
+
+// ---- GetNode ----
+
+func TestGetNodeFound(t *testing.T) {
+	lru := New()
+	lru.MoveToFront("a")
+
+	node := lru.GetNode("a")
+	if node == nil {
+		t.Fatalf("GetNode returned nil for existing key")
+	}
+	if node.GetData() != "a" {
+		t.Errorf("node.GetData() = %q, want \"a\"", node.GetData())
+	}
+}
+
+func TestGetNodeNotFound(t *testing.T) {
+	lru := New()
+	if node := lru.GetNode("missing"); node != nil {
+		t.Errorf("GetNode returned non-nil for missing key")
+	}
+}
+
+func TestGetNodeRemovedAfterRemove(t *testing.T) {
+	lru := New()
+	lru.MoveToFront("a")
+	lru.Remove("a")
+
+	if node := lru.GetNode("a"); node != nil {
+		t.Errorf("GetNode returned non-nil after Remove")
 	}
 }
 
@@ -167,18 +188,21 @@ func TestRemoveFromBackClearsIndex(t *testing.T) {
 
 func TestLRUEvictionPattern(t *testing.T) {
 	lru := New()
-	// Fill with 3 items
 	lru.MoveToFront("a")
 	lru.MoveToFront("b")
 	lru.MoveToFront("c") // order: c -> b -> a
 
-	// Access "a" — it should move to front
+	// Access "a" — moves to front.
 	lru.MoveToFront("a") // order: a -> c -> b
 
-	// Evict LRU (back = "b")
-	key, _ := lru.RemoveFromBack()
-	if key != "b" {
-		t.Errorf("evicted %q, want 'b'", key)
+	// Peek and remove LRU (back = "b") — mirrors makeRoom behaviour.
+	key, ok := lru.PeekBack()
+	if !ok || key != "b" {
+		t.Errorf("PeekBack() = (%q, %v), want (\"b\", true)", key, ok)
 	}
+	lru.Remove(key)
 	assertOrder(t, lru, []string{"a", "c"})
+	if lru.GetNode("b") != nil {
+		t.Errorf("'b' should be gone from index after Remove")
+	}
 }
