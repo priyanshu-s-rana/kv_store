@@ -3,10 +3,14 @@ package server
 import (
 	"bufio"
 	"fmt"
+	"io"
 	"net"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/priyanshu-s-rana/kv_store/constants"
 	"github.com/priyanshu-s-rana/kv_store/store"
 )
 
@@ -261,5 +265,287 @@ func TestSubscribeNoTopics(t *testing.T) {
 	got := readResp(t, r, conn)
 	if len(got) == 0 || got[0] != '-' {
 		t.Errorf("SUBSCRIBE with no topics = %q, want error", got)
+	}
+}
+
+// readFullBulkResp reads a RESP bulk string including multi-line content.
+// Regular readResp stops at the first \n inside the payload, so MGET (which
+// returns a numbered bulk string with embedded newlines) needs this helper.
+func readFullBulkResp(t *testing.T, r *bufio.Reader, conn net.Conn) string {
+	t.Helper()
+	conn.SetReadDeadline(time.Now().Add(time.Second))
+	header, err := r.ReadString('\n')
+	if err != nil {
+		t.Fatalf("readFullBulkResp header: %v", err)
+	}
+	if header == "$-1\r\n" || len(header) == 0 || header[0] != '$' {
+		return header
+	}
+	n, err := strconv.Atoi(strings.TrimRight(header[1:], "\r\n"))
+	if err != nil {
+		t.Fatalf("readFullBulkResp parse length %q: %v", header, err)
+	}
+	buf := make([]byte, n+2) // +2 for trailing \r\n
+	if _, err := io.ReadFull(r, buf); err != nil {
+		t.Fatalf("readFullBulkResp payload: %v", err)
+	}
+	return header + string(buf)
+}
+
+// ---- MSET ----
+
+func TestMSET(t *testing.T) {
+	conn, r := testConn(t)
+	writeLine(t, conn, "MSET k1 v1 k2 v2")
+	if got := readResp(t, r, conn); got != "+OK\r\n" {
+		t.Errorf("MSET = %q, want +OK\\r\\n", got)
+	}
+	writeLine(t, conn, "GET k1")
+	if got := readResp(t, r, conn); got != "$2\r\nv1\r\n" {
+		t.Errorf("GET k1 after MSET = %q, want $2\\r\\nv1\\r\\n", got)
+	}
+	writeLine(t, conn, "GET k2")
+	if got := readResp(t, r, conn); got != "$2\r\nv2\r\n" {
+		t.Errorf("GET k2 after MSET = %q, want $2\\r\\nv2\\r\\n", got)
+	}
+}
+
+func TestMSETWrongArgs(t *testing.T) {
+	conn, r := testConn(t)
+	writeLine(t, conn, "MSET k1")
+	got := readResp(t, r, conn)
+	if len(got) == 0 || got[0] != '-' {
+		t.Errorf("MSET odd args = %q, want error", got)
+	}
+}
+
+// ---- MGET ----
+
+func TestMGET(t *testing.T) {
+	conn, r := testConn(t)
+	writeLine(t, conn, "MSET k1 v1 k2 v2")
+	readResp(t, r, conn)
+
+	writeLine(t, conn, "MGET k1 k2")
+	got := readFullBulkResp(t, r, conn)
+	if !strings.Contains(got, "v1") {
+		t.Errorf("MGET missing v1: %q", got)
+	}
+	if !strings.Contains(got, "v2") {
+		t.Errorf("MGET missing v2: %q", got)
+	}
+}
+
+func TestMGETMissingKey(t *testing.T) {
+	conn, r := testConn(t)
+	writeLine(t, conn, "SET k v")
+	readResp(t, r, conn)
+
+	writeLine(t, conn, "MGET k missing")
+	got := readFullBulkResp(t, r, conn)
+	if !strings.Contains(got, "v") {
+		t.Errorf("MGET missing existing value: %q", got)
+	}
+	if !strings.Contains(got, constants.NIL_DISPLAY) {
+		t.Errorf("MGET missing (nil) for missing key: %q", got)
+	}
+}
+
+func TestMGETWrongArgs(t *testing.T) {
+	conn, r := testConn(t)
+	writeLine(t, conn, "MGET")
+	got := readResp(t, r, conn)
+	if len(got) == 0 || got[0] != '-' {
+		t.Errorf("MGET no args = %q, want error", got)
+	}
+}
+
+// ---- INCR ----
+
+func TestINCRNewKey(t *testing.T) {
+	conn, r := testConn(t)
+	writeLine(t, conn, "INCR counter")
+	if got := readResp(t, r, conn); got != ":1\r\n" {
+		t.Errorf("INCR new key = %q, want :1\\r\\n", got)
+	}
+}
+
+func TestINCRExistingKey(t *testing.T) {
+	conn, r := testConn(t)
+	writeLine(t, conn, "SET n 5")
+	readResp(t, r, conn)
+	writeLine(t, conn, "INCR n")
+	if got := readResp(t, r, conn); got != ":6\r\n" {
+		t.Errorf("INCR existing = %q, want :6\\r\\n", got)
+	}
+}
+
+func TestINCRNonInteger(t *testing.T) {
+	conn, r := testConn(t)
+	writeLine(t, conn, "SET k notanint")
+	readResp(t, r, conn)
+	writeLine(t, conn, "INCR k")
+	got := readResp(t, r, conn)
+	if len(got) == 0 || got[0] != '-' {
+		t.Errorf("INCR non-integer = %q, want error", got)
+	}
+}
+
+// ---- DECR ----
+
+func TestDECRNewKey(t *testing.T) {
+	conn, r := testConn(t)
+	writeLine(t, conn, "DECR counter")
+	if got := readResp(t, r, conn); got != ":-1\r\n" {
+		t.Errorf("DECR new key = %q, want :-1\\r\\n", got)
+	}
+}
+
+func TestDECRExistingKey(t *testing.T) {
+	conn, r := testConn(t)
+	writeLine(t, conn, "SET n 5")
+	readResp(t, r, conn)
+	writeLine(t, conn, "DECR n")
+	if got := readResp(t, r, conn); got != ":4\r\n" {
+		t.Errorf("DECR existing = %q, want :4\\r\\n", got)
+	}
+}
+
+func TestDECRNonInteger(t *testing.T) {
+	conn, r := testConn(t)
+	writeLine(t, conn, "SET k notanint")
+	readResp(t, r, conn)
+	writeLine(t, conn, "DECR k")
+	got := readResp(t, r, conn)
+	if len(got) == 0 || got[0] != '-' {
+		t.Errorf("DECR non-integer = %q, want error", got)
+	}
+}
+
+// ---- EXPIRE / TTL ----
+
+func TestExpireAndTTL(t *testing.T) {
+	conn, r := testConn(t)
+	writeLine(t, conn, "SET k v")
+	readResp(t, r, conn)
+
+	writeLine(t, conn, "EXPIRE k 30")
+	if got := readResp(t, r, conn); got != ":1\r\n" {
+		t.Errorf("EXPIRE = %q, want :1\\r\\n", got)
+	}
+
+	writeLine(t, conn, "TTL k")
+	got := readResp(t, r, conn)
+	if got != ":30\r\n" && got != ":29\r\n" {
+		t.Errorf("TTL after EXPIRE = %q, want ~:30\\r\\n", got)
+	}
+}
+
+func TestTTLNoExpiry(t *testing.T) {
+	conn, r := testConn(t)
+	writeLine(t, conn, "SET k v")
+	readResp(t, r, conn)
+
+	writeLine(t, conn, "TTL k")
+	if got := readResp(t, r, conn); got != ":-1\r\n" {
+		t.Errorf("TTL no expiry = %q, want :-1\\r\\n", got)
+	}
+}
+
+func TestTTLMissingKey(t *testing.T) {
+	conn, r := testConn(t)
+	writeLine(t, conn, "TTL nosuchkey")
+	if got := readResp(t, r, conn); got != ":-2\r\n" {
+		t.Errorf("TTL missing = %q, want :-2\\r\\n", got)
+	}
+}
+
+func TestExpireWrongArgs(t *testing.T) {
+	conn, r := testConn(t)
+	writeLine(t, conn, "EXPIRE k")
+	got := readResp(t, r, conn)
+	if len(got) == 0 || got[0] != '-' {
+		t.Errorf("EXPIRE wrong args = %q, want error", got)
+	}
+}
+
+// ---- KEYS ----
+
+func TestKEYS(t *testing.T) {
+	conn, r := testConn(t)
+	writeLine(t, conn, "SET user:1 a")
+	readResp(t, r, conn)
+	writeLine(t, conn, "SET user:2 b")
+	readResp(t, r, conn)
+	writeLine(t, conn, "SET session:1 c")
+	readResp(t, r, conn)
+
+	writeLine(t, conn, "KEYS user:*")
+	got := readFullBulkResp(t, r, conn)
+	if !strings.Contains(got, "user:1") {
+		t.Errorf("KEYS user:* missing user:1: %q", got)
+	}
+	if !strings.Contains(got, "user:2") {
+		t.Errorf("KEYS user:* missing user:2: %q", got)
+	}
+	if strings.Contains(got, "session:1") {
+		t.Errorf("KEYS user:* should not contain session:1: %q", got)
+	}
+}
+
+func TestKEYSAll(t *testing.T) {
+	conn, r := testConn(t)
+	writeLine(t, conn, "SET a 1")
+	readResp(t, r, conn)
+	writeLine(t, conn, "SET b 2")
+	readResp(t, r, conn)
+
+	writeLine(t, conn, "KEYS *")
+	got := readFullBulkResp(t, r, conn)
+	if !strings.Contains(got, "a") || !strings.Contains(got, "b") {
+		t.Errorf("KEYS * = %q, want both a and b", got)
+	}
+}
+
+func TestKEYSWrongArgs(t *testing.T) {
+	conn, r := testConn(t)
+	writeLine(t, conn, "KEYS")
+	got := readResp(t, r, conn)
+	if len(got) == 0 || got[0] != '-' {
+		t.Errorf("KEYS no args = %q, want error", got)
+	}
+}
+
+// ---- FLUSHALL ----
+
+func TestFLUSHALL(t *testing.T) {
+	conn, r := testConn(t)
+	writeLine(t, conn, "SET k1 v1")
+	readResp(t, r, conn)
+	writeLine(t, conn, "SET k2 v2")
+	readResp(t, r, conn)
+
+	writeLine(t, conn, "FLUSHALL")
+	if got := readResp(t, r, conn); got != "+OK\r\n" {
+		t.Errorf("FLUSHALL = %q, want +OK\\r\\n", got)
+	}
+
+	writeLine(t, conn, "GET k1")
+	if got := readResp(t, r, conn); got != "$-1\r\n" {
+		t.Errorf("GET after FLUSHALL = %q, want $-1\\r\\n", got)
+	}
+}
+
+// ---- MEMORYSTATS ----
+
+func TestMEMORYSTATS(t *testing.T) {
+	conn, r := testConn(t)
+	writeLine(t, conn, "SET k v")
+	readResp(t, r, conn)
+
+	writeLine(t, conn, "MEMORYSTATS")
+	got := readFullBulkResp(t, r, conn)
+	if !strings.Contains(got, "currentSize") {
+		t.Errorf("MEMORYSTATS missing currentSize: %q", got)
 	}
 }

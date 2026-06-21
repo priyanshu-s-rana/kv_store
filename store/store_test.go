@@ -305,3 +305,53 @@ func TestEventLoopDoesNotBlockOnUnreadResponse(t *testing.T) {
 		t.Errorf("event loop appears stuck — follow-up PING failed: %q", resp.Value)
 	}
 }
+
+func TestEventLoopDispatchesMSet(t *testing.T) {
+	s := New(0)
+	resp := send(t, s, constants.Mset, "k1", "v1", "k2", "v2")
+	if !bytes.Equal(resp.Value, []byte(respSimple(constants.OK))) {
+		t.Errorf("MSET = %q, want OK", resp.Value)
+	}
+	if got := send(t, s, constants.Get, "k1"); !bytes.Contains(got.Value, []byte("v1")) {
+		t.Errorf("k1 after MSET = %q, want v1", got.Value)
+	}
+	if got := send(t, s, constants.Get, "k2"); !bytes.Contains(got.Value, []byte("v2")) {
+		t.Errorf("k2 after MSET = %q, want v2", got.Value)
+	}
+}
+
+func TestEventLoopDispatchesMGet(t *testing.T) {
+	s := New(0)
+	send(t, s, constants.Mset, "k1", "v1", "k2", "v2")
+	resp := send(t, s, constants.Mget, "k1", "k2", "missing")
+	if !bytes.Contains(resp.Value, []byte("v1")) {
+		t.Errorf("MGET missing v1: %q", resp.Value)
+	}
+	if !bytes.Contains(resp.Value, []byte("v2")) {
+		t.Errorf("MGET missing v2: %q", resp.Value)
+	}
+}
+
+func TestEventLoopDispatchesIncr(t *testing.T) {
+	s := New(0)
+	resp := send(t, s, constants.Incr, "counter")
+	if !bytes.Equal(resp.Value, []byte(":1\r\n")) {
+		t.Errorf("INCR on missing key = %q, want :1", resp.Value)
+	}
+	resp = send(t, s, constants.Incr, "counter")
+	if !bytes.Equal(resp.Value, []byte(":2\r\n")) {
+		t.Errorf("INCR second call = %q, want :2", resp.Value)
+	}
+}
+
+func TestEventLoopDispatchesDecr(t *testing.T) {
+	s := New(0)
+	resp := send(t, s, constants.Decr, "counter")
+	if !bytes.Equal(resp.Value, []byte(":-1\r\n")) {
+		t.Errorf("DECR on missing key = %q, want :-1", resp.Value)
+	}
+	resp = send(t, s, constants.Decr, "counter")
+	if !bytes.Equal(resp.Value, []byte(":-2\r\n")) {
+		t.Errorf("DECR second call = %q, want :-2", resp.Value)
+	}
+}

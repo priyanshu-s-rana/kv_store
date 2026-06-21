@@ -22,7 +22,7 @@ func (s *Store) ping() Response {
 // @returns  nil: if the key does not exist or is expired.
 func (s *Store) get(args []string) Response {
 	if len(args) < 1 {
-		return Response{Value: parser.Error(fmt.Sprintf(constants.WRONG_NUM_ARGS, "GET"))}
+		return Response{Value: parser.Error(fmt.Sprintf(constants.WRONG_NUM_ARGS, constants.Get))}
 	}
 
 	key := args[0]
@@ -48,7 +48,7 @@ func (s *Store) get(args []string) Response {
 // @returns OK: if the command is successful,
 func (s *Store) set(args []string) Response {
 	if len(args) < 2 {
-		return Response{Value: parser.Error(fmt.Sprintf(constants.WRONG_NUM_ARGS, "SET"))}
+		return Response{Value: parser.Error(fmt.Sprintf(constants.WRONG_NUM_ARGS, constants.Set))}
 	}
 	value := args[1]
 	e := entry{value: []byte(value)}
@@ -68,7 +68,7 @@ func (s *Store) set(args []string) Response {
 // @returns 1: if the key exists and is deleted.
 func (s *Store) del(args []string) Response {
 	if len(args) < 1 {
-		return Response{Value: parser.Error(fmt.Sprintf(constants.WRONG_NUM_ARGS, "DEL"))}
+		return Response{Value: parser.Error(fmt.Sprintf(constants.WRONG_NUM_ARGS, constants.Del))}
 	}
 
 	key := args[0]
@@ -86,7 +86,7 @@ func (s *Store) del(args []string) Response {
 // @returns 1: if the ttl is set successfully.
 func (s *Store) expire(args []string) Response {
 	if len(args) < 2 {
-		return Response{Value: parser.Error(fmt.Sprintf(constants.WRONG_NUM_ARGS, "EXPIRE"))}
+		return Response{Value: parser.Error(fmt.Sprintf(constants.WRONG_NUM_ARGS, constants.Expire))}
 	}
 
 	key := args[0]
@@ -113,7 +113,7 @@ func (s *Store) expire(args []string) Response {
 // @returns -1: if the key exists but has no expiry, and the TTL in seconds otherwise.
 func (s *Store) ttl(args []string) Response {
 	if len(args) < 1 {
-		return Response{Value: parser.Error(fmt.Sprintf(constants.WRONG_NUM_ARGS, "TTL"))}
+		return Response{Value: parser.Error(fmt.Sprintf(constants.WRONG_NUM_ARGS, constants.TTL))}
 	}
 
 	key := args[0]
@@ -175,7 +175,7 @@ func (s *Store) Unsubscribe(topic string, ch chan []byte) {
 // @returns the number of subscribers that received the message.
 func (s *Store) publish(args []string) Response {
 	if len(args) < 2 {
-		return Response{Value: parser.Error(fmt.Sprintf(constants.WRONG_NUM_ARGS, "PUBLISH"))}
+		return Response{Value: parser.Error(fmt.Sprintf(constants.WRONG_NUM_ARGS, constants.Publish))}
 	}
 
 	topic, message := args[0], strings.Join(args[1:], " ")
@@ -235,7 +235,7 @@ func (s *Store) snapshot() {
 // @returns bulk string with keys numbered and newline-separated.
 func (s *Store) keys(args []string) Response {
 	if len(args) < 1 {
-		return Response{Value: parser.Error(fmt.Sprintf(constants.WRONG_NUM_ARGS, "KEYS"))}
+		return Response{Value: parser.Error(fmt.Sprintf(constants.WRONG_NUM_ARGS, constants.Keys))}
 	}
 	var keys []string
 	keyCount := 1
@@ -265,4 +265,53 @@ func (s *Store) flushAll() Response {
 // MEMORY STATS command returns a flat array of memory metric key-value pairs.
 func (s *Store) memoryStats() Response {
 	return Response{Value: parser.BulkString(s.memoryProfile.getStats())}
+}
+
+// MGET command returns the values of all specified keys.
+// Missing or expired keys show as (nil). Response is a bulk string with numbered lines,
+// matching the same format as the KEYS command.
+func (s *Store) mget(args []string) Response {
+	if len(args) < 1 {
+		return Response{Value: parser.Error(fmt.Sprintf(constants.WRONG_NUM_ARGS, constants.Mget))}
+	}
+	values := mgetValues(s, args)
+	entries := make([]string, len(values))
+	for i, v := range values {
+		if v == "" {
+			entries[i] = fmt.Sprintf("%d) %s", i+1, constants.NIL_DISPLAY)
+		} else {
+			entries[i] = fmt.Sprintf("%d) %s", i+1, v)
+		}
+	}
+	return Response{Value: parser.BulkString(strings.Join(entries, "\n"))}
+}
+
+// MSET command sets multiple key-value pairs atomically.
+// @returns OK: always.
+func (s *Store) mset(args []string) Response {
+	keyCount, ok := msetResponseCheck(args)
+	if !ok {
+		return Response{Value: parser.Error(fmt.Sprintf(constants.WRONG_NUM_ARGS, constants.Mset))}
+	}
+	msetPairs(s, args, keyCount)
+	makeRoom(s)
+	return Response{Value: parser.SimpleString(constants.OK)}
+}
+
+// INCR command increments the integer value of key by 1. Initialises to 1 if missing.
+// @returns the new integer value, or an error if the value is not an integer.
+func (s *Store) incr(args []string) Response {
+	if len(args) < 1 {
+		return Response{Value: parser.Error(fmt.Sprintf(constants.WRONG_NUM_ARGS, constants.Incr))}
+	}
+	return incrBy(s, args[0], 1)
+}
+
+// DECR command decrements the integer value of key by 1. Initialises to -1 if missing.
+// @returns the new integer value, or an error if the value is not an integer.
+func (s *Store) decr(args []string) Response {
+	if len(args) < 1 {
+		return Response{Value: parser.Error(fmt.Sprintf(constants.WRONG_NUM_ARGS, constants.Decr))}
+	}
+	return incrBy(s, args[0], -1)
 }

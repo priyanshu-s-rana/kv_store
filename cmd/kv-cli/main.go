@@ -144,24 +144,5 @@ func readLoop(reader *bufio.Reader, out io.Writer) {
 
 // readServerResponse reads one RESP message from serverReader and returns it as a string.
 func readServerResponse(serverReader *bufio.Reader) (string, error) {
-	data, err := serverReader.Peek(1)
-	if len(data) == 0 || err != nil {
-		return "", fmt.Errorf("[cli] error reading server response: %v", err)
-	}
-
-	switch data[0] {
-	case '+':
-		return parser.DecodeSimpleString(serverReader, data), nil
-	case '-':
-		msg := parser.DecodeError(serverReader, data)
-		return msg, fmt.Errorf("%s", msg)
-	case ':':
-		return parser.DecodeInteger(serverReader, data), nil
-	case '$':
-		return parser.DecodeBulkString(serverReader, data), nil
-	case '*':
-		return parser.DecodeArray(serverReader, data), nil
-	default:
-		return serverReader.ReadString('\n')
-	}
+	return parser.ReadResponse(serverReader)
 }

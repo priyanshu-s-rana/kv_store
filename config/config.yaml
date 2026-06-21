@@ -3,7 +3,7 @@ SERVER:
   PORT: "5040"
 
 SNAPSHOT:
-  PATH: "./data/dump.rb"
+  PATH: "./data/dump.gob"
   INTERVAL: 60s
 
 MEMORY:
