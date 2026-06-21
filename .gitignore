@@ -2,6 +2,16 @@
 data/
 
 # build output
-kv_store
-kv-cli
-kv-server
+/kv_store
+/kv-cli
+/kv-server
+
+# test binaries
+*.test
+
+# Go workspace
+go.work
+go.work.sum
+
+# OS
+.DS_Store

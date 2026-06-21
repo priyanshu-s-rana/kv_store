@@ -99,6 +99,14 @@ func (store *Store) eventLoop() {
 			resp = store.flushAll()
 		case constants.MemoryStats:
 			resp = store.memoryStats()
+		case constants.Mget:
+			resp = store.mget(cmd.Args)
+		case constants.Mset:
+			resp = store.mset(cmd.Args)
+		case constants.Incr:
+			resp = store.incr(cmd.Args)
+		case constants.Decr:
+			resp = store.decr(cmd.Args)
 		case constants.EVICT:
 			store.evict()
 			continue

@@ -120,3 +120,63 @@ func makeRoom(s *Store) {
 		deleteKey(s, key)
 	}
 }
+
+// incrBy atomically adjusts the integer value of key by delta.
+// If the key is missing or expired it is initialised to delta.
+// @returns Response with the new integer value, or an error if the value is not an integer.
+func incrBy(s *Store, key string, delta int) Response {
+	valueEntry, ok := s.data[key]
+	if !ok || valueEntry.isExpired() {
+		if ok {
+			deleteKey(s, key)
+		}
+		e := entry{value: []byte(strconv.Itoa(delta))}
+		setKey(s, key, &e, nil)
+		makeRoom(s)
+		return Response{Value: parser.Integer(delta)}
+	}
+	value, err := strconv.Atoi(string(valueEntry.value))
+	if err != nil {
+		return Response{Value: parser.Error(constants.NOT_INTEGER)}
+	}
+	value += delta
+	e := entry{value: []byte(strconv.Itoa(value)), expiry: valueEntry.expiry}
+	setKey(s, key, &e, nil)
+	makeRoom(s)
+	return Response{Value: parser.Integer(value)}
+}
+
+// @returns (keyCount, valid )
+func msetResponseCheck(args []string) (keyCount int, valid bool) {
+	if len(args) < 2 {
+		return 0, false
+	}
+	return len(args) / 2, len(args)%2 == 0
+}
+
+// mgetValues looks up each key in keys and returns a string slice of their values.
+// Missing or expired keys are replaced with "" (empty string, encoded as a null bulk string by the caller); expired keys are lazily deleted.
+func mgetValues(s *Store, keys []string) []string {
+	result := make([]string, len(keys))
+	for i, key := range keys {
+		e, ok := s.data[key]
+		if !ok || e.isExpired() {
+			if ok {
+				deleteKey(s, key)
+			}
+			result[i] = ""
+			continue
+		}
+		s.lru.MoveToFront(key)
+		result[i] = string(e.value)
+	}
+	return result
+}
+
+// msetPairs writes keyCount key-value pairs from args (interleaved as k,v,k,v,...) into the store.
+func msetPairs(s *Store, args []string, keyCount int) {
+	for i := range keyCount {
+		e := entry{value: []byte(args[i*2+1])}
+		setKey(s, args[i*2], &e, nil)
+	}
+}

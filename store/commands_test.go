@@ -1105,3 +1105,207 @@ func TestSnapshotIsDecoupledFromStore(t *testing.T) {
 		t.Errorf("snapshot len = %d, want 1", len(resp.data))
 	}
 }
+
+// ---- MSET ----
+
+func TestMSetBasic(t *testing.T) {
+	s := newTestStore()
+	assertValue(t, s.mset([]string{"k1", "v1", "k2", "v2"}), respSimple(constants.OK))
+
+	if string(s.data["k1"].value) != "v1" {
+		t.Errorf("k1 = %q, want v1", s.data["k1"].value)
+	}
+	if string(s.data["k2"].value) != "v2" {
+		t.Errorf("k2 = %q, want v2", s.data["k2"].value)
+	}
+}
+
+func TestMSetOverwritesExisting(t *testing.T) {
+	s := newTestStore()
+	s.mset([]string{"k", "old"})
+	s.mset([]string{"k", "new"})
+	if string(s.data["k"].value) != "new" {
+		t.Errorf("k = %q, want new", s.data["k"].value)
+	}
+}
+
+func TestMSetOddArgsError(t *testing.T) {
+	s := newTestStore()
+	resp := s.mset([]string{"k1", "v1", "k2"})
+	want := respError(fmt.Sprintf(constants.WRONG_NUM_ARGS, constants.Mset))
+	assertValue(t, resp, want)
+}
+
+func TestMSetWrongArgs(t *testing.T) {
+	s := newTestStore()
+	resp := s.mset([]string{"k1"})
+	want := respError(fmt.Sprintf(constants.WRONG_NUM_ARGS, constants.Mset))
+	assertValue(t, resp, want)
+}
+
+func TestMSetChargesMemoryForAllKeys(t *testing.T) {
+	s := newTestStore()
+	s.mset([]string{"k1", "v1", "k2", "v2"})
+	if s.memoryProfile.keyCount != 2 {
+		t.Errorf("keyCount = %d, want 2", s.memoryProfile.keyCount)
+	}
+}
+
+// ---- MGET ----
+
+func TestMGetBasic(t *testing.T) {
+	s := newTestStore()
+	s.set([]string{"k1", "v1"})
+	s.set([]string{"k2", "v2"})
+	resp := s.mget([]string{"k1", "k2"})
+	if !bytes.Contains(resp.Value, []byte("v1")) {
+		t.Errorf("mget missing v1: %q", resp.Value)
+	}
+	if !bytes.Contains(resp.Value, []byte("v2")) {
+		t.Errorf("mget missing v2: %q", resp.Value)
+	}
+}
+
+func TestMGetMissingKeyReturnsNil(t *testing.T) {
+	s := newTestStore()
+	s.set([]string{"k1", "v1"})
+	resp := s.mget([]string{"k1", "missing"})
+	if !bytes.Contains(resp.Value, []byte("v1")) {
+		t.Errorf("mget missing v1: %q", resp.Value)
+	}
+	if !bytes.Contains(resp.Value, []byte(constants.NIL_DISPLAY)) {
+		t.Errorf("mget missing nil for missing key: %q", resp.Value)
+	}
+}
+
+func TestMGetExpiredKeyReturnsNil(t *testing.T) {
+	s := newTestStore()
+	s.data["k"] = &entry{value: []byte("v"), expiry: time.Now().Add(-1 * time.Second)}
+	resp := s.mget([]string{"k"})
+	if !bytes.Contains(resp.Value, []byte(constants.NIL_DISPLAY)) {
+		t.Errorf("mget should return nil for expired key: %q", resp.Value)
+	}
+	if _, ok := s.data["k"]; ok {
+		t.Errorf("expired key should be lazily deleted by mget")
+	}
+}
+
+func TestMGetMovesLRUToFront(t *testing.T) {
+	s := newTestStore()
+	s.set([]string{"a", "1"})
+	s.set([]string{"b", "2"})
+	s.set([]string{"c", "3"}) // order: c(head) → b → a(tail)
+
+	s.mget([]string{"a"}) // access "a" → moves to front
+
+	tail, ok := s.lru.PeekBack()
+	if !ok {
+		t.Fatal("LRU is empty")
+	}
+	if tail != "b" {
+		t.Errorf("tail after MGET a = %q, want 'b'", tail)
+	}
+}
+
+func TestMGetWrongArgs(t *testing.T) {
+	s := newTestStore()
+	resp := s.mget([]string{})
+	want := respError(fmt.Sprintf(constants.WRONG_NUM_ARGS, constants.Mget))
+	assertValue(t, resp, want)
+}
+
+// ---- INCR ----
+
+func TestIncrMissingKeyInitialisesToOne(t *testing.T) {
+	s := newTestStore()
+	assertValue(t, s.incr([]string{"k"}), respInt(1))
+	if string(s.data["k"].value) != "1" {
+		t.Errorf("value = %q, want 1", s.data["k"].value)
+	}
+}
+
+func TestIncrIncrementsExistingKey(t *testing.T) {
+	s := newTestStore()
+	s.set([]string{"k", "5"})
+	assertValue(t, s.incr([]string{"k"}), respInt(6))
+	if string(s.data["k"].value) != "6" {
+		t.Errorf("value = %q, want 6", s.data["k"].value)
+	}
+}
+
+func TestIncrNonIntegerError(t *testing.T) {
+	s := newTestStore()
+	s.set([]string{"k", "notanint"})
+	assertValue(t, s.incr([]string{"k"}), respError(constants.NOT_INTEGER))
+}
+
+func TestIncrExpiredKeyInitialisesToOne(t *testing.T) {
+	s := newTestStore()
+	s.data["k"] = &entry{value: []byte("5"), expiry: time.Now().Add(-1 * time.Second)}
+	assertValue(t, s.incr([]string{"k"}), respInt(1))
+}
+
+func TestIncrPreservesExpiry(t *testing.T) {
+	s := newTestStore()
+	expiry := time.Now().Add(10 * time.Second)
+	s.data["k"] = &entry{value: []byte("1"), expiry: expiry}
+	s.incr([]string{"k"})
+	if !s.data["k"].expiry.Equal(expiry) {
+		t.Errorf("expiry changed after INCR")
+	}
+}
+
+func TestIncrWrongArgs(t *testing.T) {
+	s := newTestStore()
+	resp := s.incr([]string{})
+	want := respError(fmt.Sprintf(constants.WRONG_NUM_ARGS, constants.Incr))
+	assertValue(t, resp, want)
+}
+
+// ---- DECR ----
+
+func TestDecrMissingKeyInitialisesToMinusOne(t *testing.T) {
+	s := newTestStore()
+	assertValue(t, s.decr([]string{"k"}), respInt(-1))
+	if string(s.data["k"].value) != "-1" {
+		t.Errorf("value = %q, want -1", s.data["k"].value)
+	}
+}
+
+func TestDecrDecrementsExistingKey(t *testing.T) {
+	s := newTestStore()
+	s.set([]string{"k", "5"})
+	assertValue(t, s.decr([]string{"k"}), respInt(4))
+	if string(s.data["k"].value) != "4" {
+		t.Errorf("value = %q, want 4", s.data["k"].value)
+	}
+}
+
+func TestDecrNonIntegerError(t *testing.T) {
+	s := newTestStore()
+	s.set([]string{"k", "notanint"})
+	assertValue(t, s.decr([]string{"k"}), respError(constants.NOT_INTEGER))
+}
+
+func TestDecrExpiredKeyInitialisesToMinusOne(t *testing.T) {
+	s := newTestStore()
+	s.data["k"] = &entry{value: []byte("5"), expiry: time.Now().Add(-1 * time.Second)}
+	assertValue(t, s.decr([]string{"k"}), respInt(-1))
+}
+
+func TestDecrPreservesExpiry(t *testing.T) {
+	s := newTestStore()
+	expiry := time.Now().Add(10 * time.Second)
+	s.data["k"] = &entry{value: []byte("1"), expiry: expiry}
+	s.decr([]string{"k"})
+	if !s.data["k"].expiry.Equal(expiry) {
+		t.Errorf("expiry changed after DECR")
+	}
+}
+
+func TestDecrWrongArgs(t *testing.T) {
+	s := newTestStore()
+	resp := s.decr([]string{})
+	want := respError(fmt.Sprintf(constants.WRONG_NUM_ARGS, constants.Decr))
+	assertValue(t, resp, want)
+}

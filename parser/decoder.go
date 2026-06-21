@@ -3,9 +3,37 @@ package parser
 import (
 	"bufio"
 	"bytes"
+	"fmt"
 	"strconv"
 	"strings"
 )
+
+// ReadResponse reads one complete RESP message from reader and returns it as a
+// human-readable string. Returns a non-nil error for both connection failures
+// and server-side RESP error responses (type '-'), so callers can use a single
+// err != nil check without inspecting the string.
+func ReadResponse(reader *bufio.Reader) (string, error) {
+	data, err := reader.Peek(1)
+	if len(data) == 0 || err != nil {
+		return "", fmt.Errorf("error reading server response: %v", err)
+	}
+
+	switch data[0] {
+	case '+':
+		return DecodeSimpleString(reader, data), nil
+	case '-':
+		msg := DecodeError(reader, data)
+		return msg, fmt.Errorf("%s", msg)
+	case ':':
+		return DecodeInteger(reader, data), nil
+	case '$':
+		return DecodeBulkString(reader, data), nil
+	case '*':
+		return DecodeArray(reader, data), nil
+	default:
+		return reader.ReadString('\n')
+	}
+}
 
 // DecodeArray parses a RESP array and returns its string elements.
 // @returns []string: the decoded elements in order.
