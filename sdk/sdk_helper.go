@@ -32,8 +32,8 @@ func parseMGetResponse(s string) []string {
 	return result
 }
 
-// parseSetRequest appends any SET modifiers (EX, NX, XX) to args based on the provided options.
-func parseSetRequest(args []string, options ...SetOption) []string {
+// buildSetArgs appends any SET modifiers (EX, NX, XX) to args based on the provided options.
+func buildSetArgs(args []string, options ...SetOption) []string {
 	setOptions := &setOptions{}
 	for _, opt := range options {
 		opt(setOptions)
@@ -79,7 +79,7 @@ func (client *KVStoreClient) handleSubscribe(msg ...string) (*Subscription, erro
 		subscriber.Unsubscribe()
 		return nil, fmt.Errorf("[KVStore Subscription Client] error writing to server: %v", err)
 	}
-	first, err := parser.ReadResponse(&subscriber.reader)
+	first, err := parser.ReadResponse(subscriber.reader)
 	if err != nil {
 		subscriber.Unsubscribe()
 		return nil, err
@@ -89,7 +89,7 @@ func (client *KVStoreClient) handleSubscribe(msg ...string) (*Subscription, erro
 		defer close(subscriber.message)
 		subscriber.message <- first
 		for {
-			msg, err := parser.ReadResponse(&subscriber.reader)
+			msg, err := parser.ReadResponse(subscriber.reader)
 			if err != nil {
 				return
 			}

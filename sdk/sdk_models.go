@@ -9,7 +9,7 @@ import (
 type Subscription struct {
 	conn    net.Conn
 	addr    string
-	reader  bufio.Reader
+	reader  *bufio.Reader
 	message chan string
 }
 
@@ -22,7 +22,7 @@ func NewSubscription(address string) (*Subscription, error) {
 	return &Subscription{
 		conn:    conn,
 		addr:    address,
-		reader:  *bufio.NewReader(conn),
+		reader:  bufio.NewReader(conn),
 		message: make(chan string, 16),
 	}, nil
 }
