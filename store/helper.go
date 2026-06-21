@@ -146,7 +146,7 @@ func incrBy(s *Store, key string, delta int) Response {
 	return Response{Value: parser.Integer(value)}
 }
 
-// @returns (keyCount, valid )
+// msetResponseCheck validates that args is a non-empty, even-length slice and returns the pair count.
 func msetResponseCheck(args []string) (keyCount int, valid bool) {
 	if len(args) < 2 {
 		return 0, false
