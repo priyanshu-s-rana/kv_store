@@ -105,6 +105,7 @@ func (memProf *MemoryProfile) recordLRURemove(node *linkedList.List[string]) {
 	_resetToZeroIfNegative(&memProf.lruBytes)
 }
 
+// recordPubSubTopicSize charges pubsubBytes for a newly created topic. Empty topic is a no-op.
 func (memProf *MemoryProfile) recordPubSubTopicSize(topic string) {
 	if topic == "" {
 		return
@@ -112,6 +113,7 @@ func (memProf *MemoryProfile) recordPubSubTopicSize(topic string) {
 	memProf.pubsubBytes += constants.STRING_OVERHEAD + int64(len(topic))
 }
 
+// recordPubSubTopicRemove releases pubsubBytes for a topic that has no remaining subscribers. Empty topic is a no-op.
 func (memProf *MemoryProfile) recordPubSubTopicRemove(topic string) {
 	if topic == "" {
 		return
@@ -120,21 +122,25 @@ func (memProf *MemoryProfile) recordPubSubTopicRemove(topic string) {
 	_resetToZeroIfNegative(&memProf.pubsubBytes)
 }
 
+// recordPubSubSubscriber charges pubsubBytes for one new subscriber channel.
 func (memProf *MemoryProfile) recordPubSubSubscriber() {
 	memProf.pubsubBytes += constants.BYTE_CHANNEL_OVERHEAD // chan []byte
 }
 
+// recordPubSubSubscriberRemove releases pubsubBytes for one departing subscriber channel.
 func (memProf *MemoryProfile) recordPubSubSubscriberRemove() {
 	memProf.pubsubBytes -= constants.BYTE_CHANNEL_OVERHEAD
 	_resetToZeroIfNegative(&memProf.pubsubBytes)
 }
 
+// _resetToZeroIfNegative clamps memorySize to 0 if it went negative due to accounting drift.
 func _resetToZeroIfNegative(memorySize *int64) {
 	if *memorySize < 0 {
 		*memorySize = 0
 	}
 }
 
+// resetAll zeroes all dynamic memory fields. Used by FLUSHALL to reset accounting after clearing the store.
 func (memProf *MemoryProfile) resetAll() {
 	memProf.keyCount = 0
 	memProf.keyBytes = 0
@@ -144,6 +150,7 @@ func (memProf *MemoryProfile) resetAll() {
 	memProf.pubsubBytes = 0
 }
 
+// getStats returns all memory fields as a newline-separated string of "label: value" pairs.
 func (memProf *MemoryProfile) getStats() string {
 	stats := []string{
 		fmt.Sprintf("currentSize: %d B", memProf.currentMemorySize()),
