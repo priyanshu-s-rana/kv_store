@@ -49,9 +49,9 @@ func (client *KVStoreClient) Get(key string) (string, error) {
 // Set stores value under key and returns "OK" on success.
 // Accepts optional modifiers: WithEX(secs), WithNX (set if not exists), WithXX (set if exists).
 // NX and XX return "nil" when their condition is not met instead of returning an error.
-func (client *KVStoreClient) Set(key string, value []byte, options ...SetOption) (string, error) {
-	args := []string{string(constants.Set), key, string(value)}
-	return client.sendCommand(parseSetRequest(args, options...)...)
+func (client *KVStoreClient) Set(key string, value string, options ...SetOption) (string, error) {
+	args := []string{string(constants.Set), key, value}
+	return client.sendCommand(buildSetArgs(args, options...)...)
 }
 
 // Del removes key and returns 1 if deleted, 0 if it did not exist.

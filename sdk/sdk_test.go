@@ -64,7 +64,7 @@ func TestSDKPing(t *testing.T) {
 
 func TestSDKSetGet(t *testing.T) {
 	c := newTestClient(t)
-	if _, err := c.Set("k", []byte("v")); err != nil {
+	if _, err := c.Set("k", "v"); err != nil {
 		t.Fatalf("Set: %v", err)
 	}
 	resp, err := c.Get("k")
@@ -91,7 +91,7 @@ func TestSDKGetMissing(t *testing.T) {
 
 func TestSDKDel(t *testing.T) {
 	c := newTestClient(t)
-	c.Set("k", []byte("v"))
+	c.Set("k", "v")
 	resp, err := c.Del("k")
 	if err != nil {
 		t.Fatalf("Del: %v", err)
@@ -120,7 +120,7 @@ func TestSDKDelMissing(t *testing.T) {
 
 func TestSDKExpireAndTTL(t *testing.T) {
 	c := newTestClient(t)
-	c.Set("k", []byte("v"))
+	c.Set("k", "v")
 	c.Expire("k", 30)
 	resp, err := c.TTL("k")
 	if err != nil {
@@ -133,7 +133,7 @@ func TestSDKExpireAndTTL(t *testing.T) {
 
 func TestSDKTTLNoExpiry(t *testing.T) {
 	c := newTestClient(t)
-	c.Set("k", []byte("v"))
+	c.Set("k", "v")
 	resp, _ := c.TTL("k")
 	if resp != "-1" {
 		t.Errorf("TTL no expiry = %q, want -1", resp)
@@ -163,7 +163,7 @@ func TestSDKIncrNewKey(t *testing.T) {
 
 func TestSDKIncrExistingKey(t *testing.T) {
 	c := newTestClient(t)
-	c.Set("n", []byte("5"))
+	c.Set("n", "5")
 	resp, _ := c.Incr("n")
 	if resp != "6" {
 		t.Errorf("Incr = %q, want 6", resp)
@@ -183,7 +183,7 @@ func TestSDKDecrNewKey(t *testing.T) {
 
 func TestSDKDecrExistingKey(t *testing.T) {
 	c := newTestClient(t)
-	c.Set("n", []byte("5"))
+	c.Set("n", "5")
 	resp, _ := c.Decr("n")
 	if resp != "4" {
 		t.Errorf("Decr = %q, want 4", resp)
@@ -206,9 +206,17 @@ func TestSDKMSetMGet(t *testing.T) {
 	}
 }
 
+func TestSDKMSetOddArgsReturnsError(t *testing.T) {
+	c := newTestClient(t)
+	_, err := c.MSet("k1", "v1", "k2")
+	if err == nil {
+		t.Errorf("MSet with odd number of args should return error")
+	}
+}
+
 func TestSDKMGetMissingReturnsEmptyString(t *testing.T) {
 	c := newTestClient(t)
-	c.Set("k1", []byte("v1"))
+	c.Set("k1", "v1")
 	vals, err := c.MGet("k1", "missing")
 	if err != nil {
 		t.Fatalf("MGet: %v", err)
@@ -222,9 +230,9 @@ func TestSDKMGetMissingReturnsEmptyString(t *testing.T) {
 
 func TestSDKKeys(t *testing.T) {
 	c := newTestClient(t)
-	c.Set("user:1", []byte("a"))
-	c.Set("user:2", []byte("b"))
-	c.Set("session:1", []byte("c"))
+	c.Set("user:1", "a")
+	c.Set("user:2", "b")
+	c.Set("session:1", "c")
 
 	resp, err := c.Keys("user:*")
 	if err != nil {
@@ -239,7 +247,7 @@ func TestSDKKeys(t *testing.T) {
 
 func TestSDKFlushAll(t *testing.T) {
 	c := newTestClient(t)
-	c.Set("k", []byte("v"))
+	c.Set("k", "v")
 	c.FlushAll()
 	got, _ := c.Get("k")
 	if got != "nil" {
@@ -251,7 +259,7 @@ func TestSDKFlushAll(t *testing.T) {
 
 func TestSDKMemoryStats(t *testing.T) {
 	c := newTestClient(t)
-	c.Set("k", []byte("v"))
+	c.Set("k", "v")
 	resp, err := c.MemoryStats()
 	if err != nil {
 		t.Fatalf("MemoryStats: %v", err)
@@ -325,7 +333,7 @@ func TestSDKSubscribeNoTopicError(t *testing.T) {
 
 func TestSDKIncrNonIntegerReturnsError(t *testing.T) {
 	c := newTestClient(t)
-	c.Set("k", []byte("notanint"))
+	c.Set("k", "notanint")
 	_, err := c.Incr("k")
 	if err == nil {
 		t.Errorf("Incr on non-integer should return error")
@@ -336,7 +344,7 @@ func TestSDKIncrNonIntegerReturnsError(t *testing.T) {
 
 func TestSDKSetWithEX(t *testing.T) {
 	c := newTestClient(t)
-	if _, err := c.Set("k", []byte("v"), WithEX(30)); err != nil {
+	if _, err := c.Set("k", "v", WithEX(30)); err != nil {
 		t.Fatalf("Set WithEX: %v", err)
 	}
 	ttl, _ := c.TTL("k")
@@ -347,7 +355,7 @@ func TestSDKSetWithEX(t *testing.T) {
 
 func TestSDKSetWithNXKeyAbsent(t *testing.T) {
 	c := newTestClient(t)
-	resp, err := c.Set("k", []byte("v"), WithNX())
+	resp, err := c.Set("k", "v", WithNX())
 	if err != nil {
 		t.Fatalf("Set WithNX: %v", err)
 	}
@@ -358,8 +366,8 @@ func TestSDKSetWithNXKeyAbsent(t *testing.T) {
 
 func TestSDKSetWithNXKeyExists(t *testing.T) {
 	c := newTestClient(t)
-	c.Set("k", []byte("original"))
-	resp, err := c.Set("k", []byte("new"), WithNX())
+	c.Set("k", "original")
+	resp, err := c.Set("k", "new", WithNX())
 	if err != nil {
 		t.Fatalf("Set WithNX: %v", err)
 	}
@@ -374,8 +382,8 @@ func TestSDKSetWithNXKeyExists(t *testing.T) {
 
 func TestSDKSetWithXXKeyExists(t *testing.T) {
 	c := newTestClient(t)
-	c.Set("k", []byte("original"))
-	resp, err := c.Set("k", []byte("updated"), WithXX())
+	c.Set("k", "original")
+	resp, err := c.Set("k", "updated", WithXX())
 	if err != nil {
 		t.Fatalf("Set WithXX: %v", err)
 	}
@@ -390,7 +398,7 @@ func TestSDKSetWithXXKeyExists(t *testing.T) {
 
 func TestSDKSetWithXXKeyAbsent(t *testing.T) {
 	c := newTestClient(t)
-	resp, err := c.Set("k", []byte("v"), WithXX())
+	resp, err := c.Set("k", "v", WithXX())
 	if err != nil {
 		t.Fatalf("Set WithXX: %v", err)
 	}
@@ -405,7 +413,7 @@ func TestSDKSetWithXXKeyAbsent(t *testing.T) {
 
 func TestSDKSetWithEXAndNX(t *testing.T) {
 	c := newTestClient(t)
-	resp, err := c.Set("k", []byte("v"), WithEX(30), WithNX())
+	resp, err := c.Set("k", "v", WithEX(30), WithNX())
 	if err != nil {
 		t.Fatalf("Set WithEX+WithNX: %v", err)
 	}
@@ -427,7 +435,7 @@ func TestSDKSetGetRoundTrip(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(fmt.Sprintf("key=%s", tc.key), func(t *testing.T) {
-			c.Set(tc.key, []byte(tc.value))
+			c.Set(tc.key, tc.value)
 			got, err := c.Get(tc.key)
 			if err != nil {
 				t.Fatalf("Get: %v", err)
