@@ -1,0 +1,56 @@
+name: CI
+
+# Runs on every push to main and on every pull request targeting main.
+# Pull request triggers matter most in practice — this is what shows
+# up as a check directly on the PR before anything gets merged.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      # Checks out your repo's code into the runner's filesystem.
+      # Without this, the runner has nothing to build or test.
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # Installs the Go toolchain on the runner. The version here should
+      # track whatever you're actually developing against locally —
+      # mismatched versions can hide or introduce subtle differences.
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          # Reads the version directly from go.mod's go directive instead
+          # of a hardcoded string here — this can never drift out of sync
+          # with whatever version the project actually declares.
+          go-version-file: go.mod
+          # Caches module downloads between runs — same idea as the
+          # Dockerfile's go.mod/go.sum layer caching, just at the CI level.
+          cache: true
+
+      # Fastest, cheapest check — catches obvious mistakes before
+      # spending time on build/test. Fails fast on purpose.
+      - name: Vet
+        run: go vet ./...
+
+      # Confirms everything compiles cleanly across every package,
+      # including cmd/kv-server and cmd/kv-cli.
+      - name: Build
+        run: go build ./...
+
+      # The most important check for this specific project. -race
+      # instruments the binary to detect real concurrent memory access
+      # violations during test execution — this is the automated
+      # enforcement of the single-event-loop-owns-the-data-structures
+      # rule the whole store's design depends on. -v for verbose output
+      # so a failure is easy to trace back to which test caught it.
+      # -count=1 disables result caching so every CI run is a fresh
+      # execution. -timeout 120s fails fast if a goroutine deadlocks
+      # rather than letting the job hang until GitHub times it out.
+      - name: Test with race detector
+        run: go test -race -v -count=1 -timeout 120s ./...
