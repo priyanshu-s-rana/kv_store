@@ -1,0 +1,10 @@
+#!/bin/sh
+# Auto-format staged Go files and re-stage them so the commit always lands clean.
+# Non-Go files (Dockerfiles, YAML, shell scripts, etc.) and vendored code are skipped.
+STAGED=$(git diff --cached --name-only --diff-filter=ACMR \
+  | grep '\.go$' \
+  | grep -v '^vendor/')
+[ -z "$STAGED" ] && exit 0
+
+printf '%s\n' "$STAGED" | xargs gofmt -w
+printf '%s\n' "$STAGED" | xargs git add

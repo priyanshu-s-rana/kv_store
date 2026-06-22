@@ -1,0 +1,162 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  # ── Stage 1: format, secrets, test (all parallel) ────────────────────────
+
+  format:
+    name: Format
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: gofmt
+        run: |
+          files=$(gofmt -l .)
+          if [ -n "$files" ]; then
+            echo "Unformatted files (run gofmt -w .):"
+            printf '%s\n' $files
+            exit 1
+          fi
+      # Verifies that module downloads match the checksums in go.sum —
+      # catches supply-chain tampering before it reaches a build.
+      - name: Verify modules
+        run: go mod verify
+      # go mod tidy -diff exits non-zero if go.mod or go.sum are out of sync
+      # with the source — catches forgotten `go mod tidy` before review.
+      - name: Check go mod tidy
+        run: go mod tidy -diff
+
+  secrets:
+    name: Detect secrets
+    runs-on: ubuntu-latest
+    steps:
+      # fetch-depth: 0 gives gitleaks the full commit history to scan.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # ── Stage 2: coverage + diff-test (gated on all 3 above) ────────────────
+
+  test:
+    name: Test
+
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          # Caches both the module download cache and the build cache.
+          cache: true
+      - name: Vet
+        run: go vet ./...
+      - name: Build
+        run: go build ./...
+      # -race enforces the single-event-loop invariant at test time.
+      # -count=1 disables result caching. -timeout 120s fails fast on deadlocks.
+      # -json emits structured output so the metrics step can parse it with jq
+      # without the ambiguity of grep exit codes on zero matches.
+      - name: Test with race detector
+        run: |
+          set -o pipefail
+          go test -race -count=1 -timeout 120s -json ./... \
+            | tee test-results.json \
+            | jq -r 'select(.Action == "output") | .Output'
+      - name: Write test metrics
+        if: always()
+        run: |
+          if [ ! -s test-results.json ]; then
+            echo "## Test Metrics" >> $GITHUB_STEP_SUMMARY
+            echo "No results — tests may have failed to compile." >> $GITHUB_STEP_SUMMARY
+            exit 0
+          fi
+          passed=$(jq -s '[.[] | select(.Action=="pass" and .Test != null)] | length' test-results.json)
+          failed=$(jq -s '[.[] | select(.Action=="fail" and .Test != null)] | length' test-results.json)
+          {
+            echo "## Test Metrics"
+            echo "| | |"
+            echo "|---|---|"
+            echo "| ✅ Passed | $passed |"
+            echo "| ❌ Failed | $failed |"
+          } >> $GITHUB_STEP_SUMMARY
+
+  coverage:
+    name: Coverage
+    needs: [format, secrets, test]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Run coverage
+        run: go test -count=1 -timeout 120s -coverprofile=coverage.out -covermode=atomic ./...
+      - name: Write coverage summary
+        run: |
+          total=$(go tool cover -func=coverage.out | grep 'total:' | awk '{print $3}')
+          {
+            echo "## Coverage Report"
+            echo "**Total: $total**"
+            echo ""
+            echo "<details><summary>Per-package breakdown</summary>"
+            echo ""
+            echo '```'
+            go tool cover -func=coverage.out
+            echo '```'
+            echo "</details>"
+          } >> $GITHUB_STEP_SUMMARY
+      # Upload so the report can be downloaded from the Actions run page.
+      - name: Upload coverage artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: coverage.out
+
+  diff-test:
+    name: Changed packages
+    needs: [format, secrets, test]
+    runs-on: ubuntu-latest
+    # Only meaningful on PRs — push to main always tests everything via the test job.
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      # Finds Go packages that contain changed files and runs only those tests.
+      # Three-dot diff (origin/base...HEAD) gives changes since the common ancestor,
+      # which is exactly what's new in the PR branch.
+      - name: Test changed packages
+        run: |
+          git fetch origin ${{ github.base_ref }}
+          CHANGED_DIRS=$(git diff --name-only origin/${{ github.base_ref }}...HEAD \
+            | grep '\.go$' | xargs -r dirname | sort -u)
+          if [ -z "$CHANGED_DIRS" ]; then
+            echo "No Go files changed."
+            exit 0
+          fi
+          PKGS=$(echo "$CHANGED_DIRS" | while read dir; do
+            go list "./$dir" 2>/dev/null
+          done | sort -u | tr '\n' ' ')
+          if [ -z "$PKGS" ]; then
+            echo "No testable packages in changed files."
+            exit 0
+          fi
+          echo "Testing: $PKGS"
+          go test -race -count=1 -timeout 60s -v $PKGS

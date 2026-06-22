@@ -4,8 +4,8 @@ import (
 	"log"
 	"strings"
 
-	"github.com/spf13/viper"
 	"github.com/priyanshu-s-rana/kv_store/models"
+	"github.com/spf13/viper"
 )
 
 var CONFIG models.CFG
