@@ -66,16 +66,24 @@ jobs:
         run: go build ./...
       # -race enforces the single-event-loop invariant at test time.
       # -count=1 disables result caching. -timeout 120s fails fast on deadlocks.
-      # tee captures output so the metrics step can count pass/fail lines.
+      # -json emits structured output so the metrics step can parse it with jq
+      # without the ambiguity of grep exit codes on zero matches.
       - name: Test with race detector
         run: |
           set -o pipefail
-          go test -race -v -count=1 -timeout 120s ./... | tee test-output.txt
+          go test -race -count=1 -timeout 120s -json ./... \
+            | tee test-results.json \
+            | jq -r 'select(.Action == "output") | .Output'
       - name: Write test metrics
         if: always()
         run: |
-          passed=$(grep -c '--- PASS:' test-output.txt 2>/dev/null || echo 0)
-          failed=$(grep -c '--- FAIL:' test-output.txt 2>/dev/null || echo 0)
+          if [ ! -s test-results.json ]; then
+            echo "## Test Metrics" >> $GITHUB_STEP_SUMMARY
+            echo "No results — tests may have failed to compile." >> $GITHUB_STEP_SUMMARY
+            exit 0
+          fi
+          passed=$(jq -s '[.[] | select(.Action=="pass" and .Test != null)] | length' test-results.json)
+          failed=$(jq -s '[.[] | select(.Action=="fail" and .Test != null)] | length' test-results.json)
           {
             echo "## Test Metrics"
             echo "| | |"
