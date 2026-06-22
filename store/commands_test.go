@@ -212,7 +212,7 @@ func TestSetXXValueBytesUpdated(t *testing.T) {
 
 	s.set([]string{"k", "muchlonger", constants.XX})
 
-	expected := afterFirst + int64(len("muchlonger"))-int64(len("short"))
+	expected := afterFirst + int64(len("muchlonger")) - int64(len("short"))
 	if s.memoryProfile.valueBytes != expected {
 		t.Errorf("valueBytes = %d, want %d after XX update", s.memoryProfile.valueBytes, expected)
 	}
@@ -962,7 +962,7 @@ func TestMemoryStatsKeySizeIncreasesWithEachSet(t *testing.T) {
 
 func TestMemoryStatsValueSizeUpdatedOnOverwrite(t *testing.T) {
 	s := newTestStore()
-	s.set([]string{"k", "short"}) // 5 B
+	s.set([]string{"k", "short"})      // 5 B
 	s.set([]string{"k", "muchlonger"}) // 10 B — overwrite, not new key
 
 	expValSize := constants.ENTRY_OVERHEAD + int64(len("muchlonger"))
