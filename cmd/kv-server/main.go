@@ -32,11 +32,13 @@ func gracefulShutdown(store *store.Store, cancel context.CancelFunc) {
 }
 
 func main() {
+	envFlag := flag.String("env", "", "server env, tells which config to use")
 	hostFlag := flag.String("h", "", "server host, overrides config.yaml")
 	portFlag := flag.String("p", "", "server port, overrides config.yaml")
 	flag.Parse()
+	env := utils.ResolveEnv(*envFlag, os.Getenv("APP_ENV"))
 
-	config.SetConfig()
+	config.SetConfig(env)
 
 	host := utils.ResolveStringFallbacks(*hostFlag, config.CONFIG.Server.Host, "localhost")
 	port := utils.ResolveStringFallbacks(*portFlag, config.CONFIG.Server.Port, "5040")

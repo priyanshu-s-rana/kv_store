@@ -10,9 +10,8 @@ import (
 
 var CONFIG models.CFG
 
-func SetConfig() {
-
-	viper.SetConfigName("config")
+func SetConfig(env string) {
+	viper.SetConfigName("config." + env)
 	viper.SetConfigType("yaml")
 	viper.AddConfigPath(".")
 	viper.AddConfigPath("./config")
@@ -28,4 +27,5 @@ func SetConfig() {
 	if err := viper.Unmarshal(&CONFIG); err != nil {
 		log.Fatal("Unable to decode config")
 	}
+	log.Printf("[config] loaded config.%s.yaml", env)
 }
