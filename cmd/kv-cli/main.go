@@ -7,6 +7,7 @@ import (
 	"io"
 	"log"
 	"net"
+	"os"
 	"strings"
 
 	"github.com/chzyer/readline"
@@ -16,11 +17,13 @@ import (
 )
 
 func main() {
+	envFlag := flag.String("env", "", "server env, tells which config to use")
 	hostFlag := flag.String("h", "", "server host, overrides config.yaml")
 	portFlag := flag.String("p", "", "server port, overrides config.yaml")
 	flag.Parse()
 
-	config.SetConfig()
+	env := utils.ResolveEnv(*envFlag, os.Getenv("APP_ENV"))
+	config.SetConfig(env)
 
 	host := utils.ResolveStringFallbacks(*hostFlag, config.CONFIG.Server.Host, "localhost")
 	port := utils.ResolveStringFallbacks(*portFlag, config.CONFIG.Server.Port, "5040")
@@ -60,7 +63,11 @@ func main() {
 			continue
 		}
 
-		conn.Write(parser.Array(fields...))
+		_, err = conn.Write(parser.Array(fields...))
+		if err != nil {
+			fmt.Fprintln(rl.Stdout(), "Error:", err)
+			continue
+		}
 
 		resp, err := readServerResponse(serverReader)
 		if err != nil {
@@ -98,7 +105,11 @@ func enterSubscribeMode(fields []string, rl *readline.Instance, addr string) {
 	subConn, subReader := mustConnect(addr)
 	defer subConn.Close()
 
-	subConn.Write(parser.Array(fields...))
+	_, err := subConn.Write(parser.Array(fields...))
+	if err != nil {
+		fmt.Fprintln(rl.Stdout(), "Error:", err)
+		return
+	}
 
 	resp, err := readServerResponse(subReader)
 	fmt.Fprintln(rl.Stdout(), resp)

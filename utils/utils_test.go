@@ -43,3 +43,45 @@ func TestResolveStringFallbacksSingleValid(t *testing.T) {
 		t.Errorf("got %q, want %q", got, "only")
 	}
 }
+
+func TestResolveEnvReturnsDev(t *testing.T) {
+	if got := ResolveEnv("dev"); got != "dev" {
+		t.Errorf("got %q, want %q", got, "dev")
+	}
+}
+
+func TestResolveEnvReturnsProd(t *testing.T) {
+	if got := ResolveEnv("prod"); got != "prod" {
+		t.Errorf("got %q, want %q", got, "prod")
+	}
+}
+
+func TestResolveEnvFirstWins(t *testing.T) {
+	if got := ResolveEnv("dev", "prod"); got != "dev" {
+		t.Errorf("got %q, want %q", got, "dev")
+	}
+}
+
+func TestResolveEnvSkipsEmpty(t *testing.T) {
+	if got := ResolveEnv("", "prod"); got != "prod" {
+		t.Errorf("got %q, want %q", got, "prod")
+	}
+}
+
+func TestResolveEnvSkipsUnrecognized(t *testing.T) {
+	if got := ResolveEnv("staging", "dev"); got != "dev" {
+		t.Errorf("got %q, want %q", got, "dev")
+	}
+}
+
+func TestResolveEnvFallsBackToDevWhenNoValidArgs(t *testing.T) {
+	if got := ResolveEnv("", "staging", "None"); got != "dev" {
+		t.Errorf("got %q, want %q", got, "dev")
+	}
+}
+
+func TestResolveEnvNoArgs(t *testing.T) {
+	if got := ResolveEnv(); got != "dev" {
+		t.Errorf("got %q, want %q", got, "dev")
+	}
+}

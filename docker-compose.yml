@@ -1,0 +1,29 @@
+services:
+  kv-server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: kv_store
+    container_name: kv-server
+    ports:
+      - "5040:5040"
+    environment:
+      APP_ENV: prod
+    volumes:
+      # Named volume mounted at /data — this is what makes dump.gob
+      # survive `docker compose down` / container recreation. Without
+      # this, /data would just be part of the container's own
+      # filesystem and reset to empty every time the container is
+      # rebuilt or recreated.
+      - kv-data:/data
+    restart: unless-stopped
+    # Healthcheck is defined in the Dockerfile itself (HEALTHCHECK
+    # instruction) — it travels with the image regardless of how it's
+    # run, so it doesn't need to be duplicated here.
+
+volumes:
+  # Named volume — Docker manages the actual storage location on the
+  # host. Persists across `docker compose down` (without -v) and
+  # across image rebuilds, since it's not tied to any specific
+  # container, only to the volume name.
+  kv-data:

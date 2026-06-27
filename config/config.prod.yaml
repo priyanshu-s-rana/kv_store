@@ -1,0 +1,10 @@
+SERVER:
+  HOST: "0.0.0.0"
+  PORT: "5040"
+
+SNAPSHOT:
+  PATH: "/data/dump.gob"
+  INTERVAL: 60s
+
+MEMORY:
+  MAX_SIZE: 0 # bytes, 0 = unlimited
