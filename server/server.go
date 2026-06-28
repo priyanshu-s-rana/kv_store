@@ -5,6 +5,7 @@ import (
 	"io"
 	"log"
 	"net"
+	"sync/atomic"
 
 	"github.com/priyanshu-s-rana/kv_store/constants"
 	"github.com/priyanshu-s-rana/kv_store/models"
@@ -12,10 +13,21 @@ import (
 	"github.com/priyanshu-s-rana/kv_store/store"
 )
 
+type serverStats struct {
+	activeConnections        atomic.Int64
+	totalConnectionsAccepted atomic.Int64
+	bytesSent                atomic.Int64
+	bytesReceived            atomic.Int64
+	parserErrors             atomic.Int64
+	commandsReceived         atomic.Int64
+	failedCommands           atomic.Int64
+}
+
 type Server struct {
 	addr    string
 	cmdChan chan<- models.Command
 	store   *store.Store
+	stats   serverStats
 }
 
 // New creates a Server bound to addr, wiring it to store's command channel.
@@ -44,6 +56,7 @@ func (s *Server) Start() error {
 			log.Printf("[server] accept error: %v\n", err)
 			continue
 		}
+		s.stats.activeConnections.Add(1)
 		go s.handleConnection(conn)
 	}
 }
@@ -52,21 +65,34 @@ func (s *Server) Start() error {
 // Reads inline or RESP commands in a loop, dispatching each to the store's event loop.
 // SUBSCRIBE breaks out of the loop and hands control to handleSubscribe for the lifetime of the subscription.
 func (s *Server) handleConnection(conn net.Conn) {
-	defer conn.Close()
+	defer func() {
+		s.stats.activeConnections.Add(-1)
+		conn.Close()
+	}()
 
 	remoteAddr := conn.RemoteAddr().String()
 	log.Printf("[server] client connected: %s\n", remoteAddr)
+	s.stats.totalConnectionsAccepted.Add(1)
 	defer log.Printf("[server] client disconnected: %s\n", remoteAddr)
 
-	p := parser.New(conn)
+	countingReader := &CountingReader{
+		reader: conn,
+	}
+	p := parser.New(countingReader)
+	var lastBytesRead int64
 	for {
 		cmd, err := p.ReadCommand()
+		current := countingReader.BytesRead()
+		s.stats.bytesReceived.Add(current - lastBytesRead)
+		lastBytesRead = current
 		if err != nil {
 			if err != io.EOF {
+				s.stats.parserErrors.Add(1)
 				log.Printf("[server] error reading command from %s: %v\n", remoteAddr, err)
 			}
 			return
 		}
+		s.stats.commandsReceived.Add(1)
 
 		if cmd.Name == constants.Subscribe {
 			s.handleSubscribe(conn, cmd.Args)
@@ -82,13 +108,10 @@ func (s *Server) handleConnection(conn net.Conn) {
 		}
 
 		resp := <-responseChan
-		if resp.Err != nil {
-			log.Printf("[server] error processing command from %s: %v\n", remoteAddr, resp.Err)
-			conn.Write(parser.Error("internal server error"))
-			continue
+		if len(resp.Value) > 0 && resp.Value[0] == '-' {
+			s.stats.failedCommands.Add(1)
 		}
-
-		conn.Write(resp.Value)
+		s.writeToConnection(conn, resp.Value)
 	}
 }
 
@@ -97,7 +120,8 @@ func (s *Server) handleConnection(conn net.Conn) {
 // Cleans up all subscriptions via defer when the connection drops.
 func (s *Server) handleSubscribe(conn net.Conn, topics []string) {
 	if len(topics) == 0 {
-		conn.Write(parser.Error("SUBSCRIBE requires at least one topic"))
+		s.stats.failedCommands.Add(1)
+		s.writeToConnection(conn, parser.Error("SUBSCRIBE requires at least one topic"))
 		return
 	}
 
@@ -117,7 +141,7 @@ func (s *Server) registerSubscription(conn net.Conn, topics []string) map[string
 		ch := s.store.Subscribe(topic)
 		channels[topic] = ch
 
-		conn.Write(parser.Array("subscribe", topic, "1"))
+		s.writeToConnection(conn, parser.Array("subscribe", topic, "1"))
 	}
 
 	return channels
@@ -151,8 +175,18 @@ func (s *Server) fanIn(channels map[string]chan []byte) <-chan []byte {
 // Returns as soon as a write fails, signalling the caller to tear down the subscription.
 func (s *Server) forwardMessages(conn net.Conn, merged <-chan []byte) {
 	for msg := range merged {
-		if _, err := conn.Write(msg); err != nil {
+		if err := s.writeToConnection(conn, msg); err != nil {
 			return
 		}
 	}
+}
+
+func (s *Server) writeToConnection(conn net.Conn, msg []byte) error {
+	bytesWritten, err := conn.Write(msg)
+	if err != nil {
+		log.Printf("[server] error writing to the connection at: %s", conn.RemoteAddr().String())
+		return err
+	}
+	s.stats.bytesSent.Add(int64(bytesWritten))
+	return nil
 }

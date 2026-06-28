@@ -144,9 +144,10 @@ func (s *Store) Subscribe(topic string) chan []byte {
 
 	if isNewTopic {
 		s.memoryProfile.recordPubSubTopicSize(topic)
+		s.pubSubStats.activeTopics.Add(1)
 	}
 	s.memoryProfile.recordPubSubSubscriber()
-
+	s.pubSubStats.activeSubscribers.Add(1)
 	return ch
 }
 
@@ -167,8 +168,11 @@ func (s *Store) Unsubscribe(topic string, ch chan []byte) {
 
 	if isTopicEmpty {
 		s.memoryProfile.recordPubSubTopicRemove(topic)
+		s.pubSubStats.activeTopics.Add(-1)
 	}
 	s.memoryProfile.recordPubSubSubscriberRemove()
+	s.pubSubStats.activeSubscribers.Add(-1)
+
 }
 
 // PUBLISH command sends a message to all subscribers of the given topic.
@@ -194,6 +198,7 @@ func (s *Store) publish(args []string) Response {
 		}
 	}
 
+	s.pubSubStats.messagesPublished.Add(int64(delivered))
 	return Response{Value: parser.Integer(delivered)}
 }
 

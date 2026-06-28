@@ -118,6 +118,9 @@ func TestNewInitializesFields(t *testing.T) {
 	if s.memoryProfile == nil {
 		t.Errorf("memoryProfile not initialized")
 	}
+	if s.pubSubStats == nil {
+		t.Errorf("pubSubStats not initialized")
+	}
 }
 
 func TestNewStartsEventLoop(t *testing.T) {

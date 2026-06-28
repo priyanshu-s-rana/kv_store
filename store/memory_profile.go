@@ -13,7 +13,8 @@ const (
 )
 
 type MemoryProfile struct {
-	maxBytes int64 // Set when initialized
+	maxBytes  int64 // Set when initialized
+	peakBytes int64 // Peak Memory Size at any given time
 
 	keyCount    int64 // Total key count in the memory (s.data)
 	keyBytes    int64 // Memory acquired by key
@@ -27,6 +28,13 @@ type MemoryProfile struct {
 // A limit of 0 means unlimited.
 func NewMemProfile(memorySize int64) *MemoryProfile {
 	return &MemoryProfile{maxBytes: memorySize}
+}
+
+func (memProf *MemoryProfile) updatePeakMemorySize() {
+	currentMemorySize := memProf.currentMemorySize()
+	if currentMemorySize > memProf.peakBytes {
+		memProf.peakBytes = currentMemorySize
+	}
 }
 
 // currentMemorySize returns the total tracked bytes including fixed struct overhead.
@@ -49,11 +57,13 @@ func (memProf *MemoryProfile) recordDataSize(key string, e *entry) {
 	memProf.keyBytes += constants.STRING_OVERHEAD + int64(len(key))
 	memProf.valueBytes += constants.ENTRY_OVERHEAD + int64(len(e.value))
 	memProf.keyCount++
+	memProf.updatePeakMemorySize()
 }
 
 // updateValueSize adjusts valueBytes by the difference when an existing key's value changes.
 func (memProf *MemoryProfile) updateValueSize(oldValue, newValue []byte) {
 	memProf.valueBytes += int64(len(newValue)) - int64(len(oldValue))
+	memProf.updatePeakMemorySize()
 }
 
 // recordDataRemove releases the key and value bytes when an entry is deleted.
@@ -76,6 +86,7 @@ func (memProf *MemoryProfile) recordTTLSize(item *ttlItem) {
 		return
 	}
 	memProf.ttlBytes += constants.TTL_ITEM_OVERHEAD + int64(len(item.key))
+	memProf.updatePeakMemorySize()
 }
 
 // recordTTLRemove releases the TTL heap bytes when an expiry entry is popped. nil is a no-op.
@@ -94,6 +105,7 @@ func (memProf *MemoryProfile) recordLRUSize(node *linkedList.List[string]) {
 		return
 	}
 	memProf.lruBytes += constants.LRU_NODE_OVERHEAD + int64(len(node.GetData()))
+	memProf.updatePeakMemorySize()
 }
 
 // recordLRURemove releases the LRU index bytes when a node is evicted or deleted. nil is a no-op.
@@ -111,6 +123,7 @@ func (memProf *MemoryProfile) recordPubSubTopicSize(topic string) {
 		return
 	}
 	memProf.pubsubBytes += constants.STRING_OVERHEAD + int64(len(topic))
+	memProf.updatePeakMemorySize()
 }
 
 // recordPubSubTopicRemove releases pubsubBytes for a topic that has no remaining subscribers. Empty topic is a no-op.
@@ -125,6 +138,7 @@ func (memProf *MemoryProfile) recordPubSubTopicRemove(topic string) {
 // recordPubSubSubscriber charges pubsubBytes for one new subscriber channel.
 func (memProf *MemoryProfile) recordPubSubSubscriber() {
 	memProf.pubsubBytes += constants.BYTE_CHANNEL_OVERHEAD // chan []byte
+	memProf.updatePeakMemorySize()
 }
 
 // recordPubSubSubscriberRemove releases pubsubBytes for one departing subscriber channel.
@@ -154,6 +168,7 @@ func (memProf *MemoryProfile) resetAll() {
 func (memProf *MemoryProfile) getStats() string {
 	stats := []string{
 		fmt.Sprintf("currentSize: %d B", memProf.currentMemorySize()),
+		fmt.Sprintf("peakSize: %d B", memProf.peakBytes),
 		fmt.Sprintf("maxSize: %d B", memProf.maxBytes),
 		fmt.Sprintf("keyCount: %d", memProf.keyCount),
 		fmt.Sprintf("keySize: %d B", memProf.keyBytes),

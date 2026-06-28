@@ -17,7 +17,6 @@ type Command struct {
 // Response carries the RESP-encoded result and any transport-level error back to the caller.
 type Response struct {
 	Value []byte
-	Err   error
 }
 
 func (resp *Response) IsError() error {

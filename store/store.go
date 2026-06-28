@@ -1,8 +1,8 @@
 package store
 
 import (
-	"log"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/priyanshu-s-rana/kv_store/constants"
@@ -46,6 +46,12 @@ type Persistence interface {
 	RebaseLine(map[string]SnapshotEntry) error
 }
 
+type pubSubStats struct {
+	activeTopics      atomic.Int64
+	activeSubscribers atomic.Int64
+	messagesPublished atomic.Int64
+}
+
 type Store struct {
 	data          map[string]*entry        // Real data of key value
 	cmdChan       chan Command             // Command channel which Event Loop interacts with
@@ -56,6 +62,7 @@ type Store struct {
 	lru           *lru.LRU                 // LRU key eviction when memory is full
 	memoryProfile *MemoryProfile           // Memory Profiling to keep track of size
 	persistence   Persistence
+	pubSubStats   *pubSubStats
 }
 
 // New creates and returns a Store with its event loop and TTL eviction goroutines running.
@@ -70,8 +77,8 @@ func New(memorySize int64, cmdChan chan Command, persistence Persistence) *Store
 		snapResp:      make(chan SnapshotResponse, 1),
 		lru:           lru.New(),
 		memoryProfile: NewMemProfile(memorySize),
-
-		persistence: persistence,
+		pubSubStats:   &pubSubStats{},
+		persistence:   persistence,
 	}
 
 	return store
