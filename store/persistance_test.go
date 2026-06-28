@@ -193,7 +193,7 @@ func TestSaveAndLoadRoundTrip(t *testing.T) {
 	send(t, s, constants.Set, "k1", "v1")
 	send(t, s, constants.Set, "k2", "v2", constants.EX, "100")
 
-	if err := s.SaveToDisk(path); err != nil {
+	if err := s.SaveToDisk(path, &SnapshotStats{}); err != nil {
 		t.Fatalf("SaveToDisk: %v", err)
 	}
 
@@ -226,7 +226,7 @@ func TestSaveToDiskAtomicNoTempLeftover(t *testing.T) {
 	s := New(0)
 	send(t, s, constants.Set, "k", "v")
 
-	if err := s.SaveToDisk(path); err != nil {
+	if err := s.SaveToDisk(path, &SnapshotStats{}); err != nil {
 		t.Fatalf("SaveToDisk: %v", err)
 	}
 
@@ -244,7 +244,7 @@ func TestSaveToDiskEmptyStore(t *testing.T) {
 	path := filepath.Join(dir, "snap.gob")
 
 	s := New(0)
-	if err := s.SaveToDisk(path); err != nil {
+	if err := s.SaveToDisk(path, &SnapshotStats{}); err != nil {
 		t.Fatalf("SaveToDisk: %v", err)
 	}
 
@@ -366,7 +366,7 @@ func TestStartSnapshotting(t *testing.T) {
 	s := New(0)
 	send(t, s, constants.Set, "k", "v")
 
-	s.StartSnapshotting(ctx, path, 50*time.Millisecond)
+	s.StartSnapshotting(ctx, path, 50*time.Millisecond, &SnapshotStats{})
 
 	deadline := time.After(2 * time.Second)
 	for {
@@ -378,5 +378,106 @@ func TestStartSnapshotting(t *testing.T) {
 			t.Fatalf("StartSnapshotting did not create a file within 2s")
 		case <-time.After(20 * time.Millisecond):
 		}
+	}
+}
+
+// ---- SnapshotStats ----
+
+// Verifies SaveToDisk populates all SnapshotStats fields on success.
+func TestSaveToDiskUpdatesStats(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "snap.gob")
+
+	s := New(0)
+	send(t, s, constants.Set, "k", "v")
+
+	snpStats := &SnapshotStats{}
+	before := time.Now()
+	if err := s.SaveToDisk(path, snpStats); err != nil {
+		t.Fatalf("SaveToDisk: %v", err)
+	}
+
+	if snpStats.SnapshotCount != 1 {
+		t.Errorf("SnapshotCount = %d, want 1", snpStats.SnapshotCount)
+	}
+	if snpStats.LastSnapshotTime.Before(before) {
+		t.Errorf("LastSnapshotTime = %v, want >= %v", snpStats.LastSnapshotTime, before)
+	}
+	if snpStats.SnapshotSizeBytes <= 0 {
+		t.Errorf("SnapshotSizeBytes = %d, want > 0", snpStats.SnapshotSizeBytes)
+	}
+	if snpStats.LastSnapshotDuration <= 0 {
+		t.Errorf("LastSnapshotDuration = %v, want > 0", snpStats.LastSnapshotDuration)
+	}
+	if snpStats.SnapshotInProgress {
+		t.Error("SnapshotInProgress should be false after successful save")
+	}
+}
+
+// Verifies SnapshotCount accumulates across multiple SaveToDisk calls.
+func TestSaveToDiskMultipleSavesAccumulateCount(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "snap.gob")
+
+	s := New(0)
+	snpStats := &SnapshotStats{}
+
+	for i := range 3 {
+		if err := s.SaveToDisk(path, snpStats); err != nil {
+			t.Fatalf("SaveToDisk call %d: %v", i, err)
+		}
+	}
+
+	if snpStats.SnapshotCount != 3 {
+		t.Errorf("SnapshotCount = %d, want 3", snpStats.SnapshotCount)
+	}
+}
+
+// Verifies GetStats returns a plain copy of the current snapshot stats.
+func TestSnapshotStatsGetStats(t *testing.T) {
+	snpStats := &SnapshotStats{
+		SnapshotCount:        5,
+		SnapshotFailures:     2,
+		SnapshotSizeBytes:    4096,
+		LastSnapshotDuration: 3 * time.Millisecond,
+	}
+
+	got := snpStats.GetStats()
+
+	if got.SnapshotCount != 5 {
+		t.Errorf("SnapshotCount = %d, want 5", got.SnapshotCount)
+	}
+	if got.SnapshotFailures != 2 {
+		t.Errorf("SnapshotFailures = %d, want 2", got.SnapshotFailures)
+	}
+	if got.SnapshotSizeBytes != 4096 {
+		t.Errorf("SnapshotSizeBytes = %d, want 4096", got.SnapshotSizeBytes)
+	}
+}
+
+// Verifies StartSnapshotting increments SnapshotCount after at least one tick.
+func TestStartSnapshottingIncrementsCount(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping timed snapshotting test in -short mode")
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "snap.gob")
+
+	s := New(0)
+	send(t, s, constants.Set, "k", "v")
+
+	snpStats := &SnapshotStats{}
+	s.StartSnapshotting(ctx, path, 50*time.Millisecond, snpStats)
+
+	time.Sleep(300 * time.Millisecond)
+	cancel()
+	time.Sleep(20 * time.Millisecond)
+
+	if snpStats.SnapshotCount < 1 {
+		t.Errorf("SnapshotCount = %d, want >= 1 after snapshotting", snpStats.SnapshotCount)
 	}
 }

@@ -16,13 +16,13 @@ import (
 
 // gracefulShutdown blocks until SIGINT or SIGTERM is received, then cancels the
 // context, flushes a final snapshot to disk, and exits cleanly.
-func gracefulShutdown(store *store.Store, cancel context.CancelFunc) {
+func gracefulShutdown(store *store.Store, cancel context.CancelFunc, snpStats *store.SnapshotStats) {
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
 	log.Println("[main] shutting down gracefully...")
 	cancel()
-	if err := store.SaveToDisk(config.CONFIG.Snapshot.Path); err != nil {
+	if err := store.SaveToDisk(config.CONFIG.Snapshot.Path, snpStats); err != nil {
 		log.Printf("[main] error saving snapshot to disk: %v", err)
 	} else {
 		log.Println("[main] final snapshot saved successfully")
@@ -48,18 +48,18 @@ func main() {
 	snapshotInterval := config.CONFIG.Snapshot.Interval
 	memorySize := config.CONFIG.Memory.MaxSize
 
+	snapshotStats := &store.SnapshotStats{}
 	store := store.New(memorySize)
-
 	if err := store.LoadFromDisk(snapshotPath); err != nil {
 		log.Printf("[main] warning: failed to load snapshot from disk: %v", err)
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	if snapshotInterval > 0 {
-		store.StartSnapshotting(ctx, snapshotPath, snapshotInterval)
+		store.StartSnapshotting(ctx, snapshotPath, snapshotInterval, snapshotStats)
 	}
 
-	go gracefulShutdown(store, cancel)
+	go gracefulShutdown(store, cancel, snapshotStats)
 
 	server := server.New(addr, store)
 	log.Printf("[main] KV Store starting server on port %s", port)

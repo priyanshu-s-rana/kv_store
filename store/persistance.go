@@ -33,7 +33,7 @@ type SnapshotResponse struct {
 
 // StartSnapshotting saves the store to disk at every interval until ctx is cancelled.
 // The caller is responsible for cancelling ctx to stop the goroutine and release the ticker.
-func (s *Store) StartSnapshotting(ctx context.Context, path string, interval time.Duration) {
+func (s *Store) StartSnapshotting(ctx context.Context, path string, interval time.Duration, snpStats *SnapshotStats) {
 	ticker := time.NewTicker(interval)
 	go func() {
 		defer ticker.Stop()
@@ -42,7 +42,8 @@ func (s *Store) StartSnapshotting(ctx context.Context, path string, interval tim
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				if err := s.SaveToDisk(path); err != nil {
+				if err := s.SaveToDisk(path, snpStats); err != nil {
+					snpStats.SnapshotFailures++
 					log.Printf(constants.SNAPSHOT_FAILED, err)
 				} else {
 					log.Printf(constants.SNAPSHOT_SAVED, path)
@@ -54,33 +55,51 @@ func (s *Store) StartSnapshotting(ctx context.Context, path string, interval tim
 
 // SaveToDisk requests a snapshot via the event loop, then encodes it to path using a
 // temp-file-then-rename strategy to avoid partial writes.
-func (s *Store) SaveToDisk(path string) error {
+func (s *Store) SaveToDisk(path string, snpStats *SnapshotStats) error {
+	snpStats.SnapshotInProgress = true
+	start := time.Now()
 
 	s.cmdChan <- Command{Name: constants.Snapshot}
 
 	resp := <-s.snapResp
 	if resp.err != nil {
+		snpStats.SnapshotInProgress = false
 		return resp.err
 	}
 
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		snpStats.SnapshotInProgress = false
 		return err
 	}
 
 	tempPath := path + ".tmp"
 	f, err := os.Create(tempPath)
 	if err != nil {
+		snpStats.SnapshotInProgress = false
 		return err
 	}
 
 	if err := gob.NewEncoder(f).Encode(resp.data); err != nil {
 		f.Close()
 		os.Remove(tempPath)
+		snpStats.SnapshotInProgress = false
+		return err
+	}
+	f.Close()
+
+	if err := os.Rename(tempPath, path); err != nil {
+		snpStats.SnapshotInProgress = false
 		return err
 	}
 
-	f.Close()
-	return os.Rename(tempPath, path)
+	if info, err := os.Stat(path); err == nil {
+		snpStats.SnapshotSizeBytes = info.Size()
+	}
+	snpStats.SnapshotCount++
+	snpStats.LastSnapshotTime = time.Now()
+	snpStats.LastSnapshotDuration = time.Since(start)
+	snpStats.SnapshotInProgress = false
+	return nil
 }
 
 // LoadFromDisk reads a gob-encoded snapshot from path and hydrates the store.

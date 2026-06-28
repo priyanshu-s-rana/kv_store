@@ -549,3 +549,101 @@ func TestMEMORYSTATS(t *testing.T) {
 		t.Errorf("MEMORYSTATS missing currentSize: %q", got)
 	}
 }
+
+// ---- GetStats ----
+
+// testServer creates an in-memory server and returns the connection, reader, and server instance.
+func testServer(t *testing.T) (net.Conn, *bufio.Reader, *Server) {
+	t.Helper()
+	st := store.New(0)
+	s := New("", st)
+	client, srv := net.Pipe()
+	t.Cleanup(func() { client.Close() })
+	go s.handleConnection(srv)
+	return client, bufio.NewReader(client), s
+}
+
+func TestGetStatsTotalConnectionsAccepted(t *testing.T) {
+	st := store.New(0)
+	s := New("", st)
+
+	c1, srv1 := net.Pipe()
+	c2, srv2 := net.Pipe()
+	t.Cleanup(func() { c1.Close(); c2.Close() })
+	go s.handleConnection(srv1)
+	go s.handleConnection(srv2)
+
+	r1 := bufio.NewReader(c1)
+	r2 := bufio.NewReader(c2)
+	writeLine(t, c1, "PING")
+	readResp(t, r1, c1)
+	writeLine(t, c2, "PING")
+	readResp(t, r2, c2)
+
+	stats := s.GetStats()
+	if stats.TotalConnectionsAccepted < 2 {
+		t.Errorf("TotalConnectionsAccepted = %d, want >= 2", stats.TotalConnectionsAccepted)
+	}
+}
+
+func TestGetStatsCommandsReceived(t *testing.T) {
+	conn, r, s := testServer(t)
+
+	writeLine(t, conn, "PING")
+	readResp(t, r, conn)
+	writeLine(t, conn, "PING")
+	readResp(t, r, conn)
+	writeLine(t, conn, "PING")
+	readResp(t, r, conn)
+
+	stats := s.GetStats()
+	if stats.CommandsReceived < 3 {
+		t.Errorf("CommandsReceived = %d, want >= 3", stats.CommandsReceived)
+	}
+}
+
+func TestGetStatsBytesReceived(t *testing.T) {
+	conn, r, s := testServer(t)
+
+	writeLine(t, conn, "PING")
+	readResp(t, r, conn)
+
+	stats := s.GetStats()
+	if stats.BytesReceived <= 0 {
+		t.Errorf("BytesReceived = %d, want > 0", stats.BytesReceived)
+	}
+}
+
+func TestGetStatsBytesSent(t *testing.T) {
+	conn, r, s := testServer(t)
+
+	writeLine(t, conn, "PING")
+	readResp(t, r, conn)
+	// Send a second command so the server goroutine has definitely finished
+	// writing (and accounting for) the first response before we read stats.
+	// bytesSent is updated after conn.Write returns, which races with readResp
+	// on net.Pipe; the extra round-trip makes that race impossible.
+	writeLine(t, conn, "PING")
+	readResp(t, r, conn)
+
+	stats := s.GetStats()
+	if stats.BytesSent <= 0 {
+		t.Errorf("BytesSent = %d, want > 0", stats.BytesSent)
+	}
+}
+
+func TestGetStatsFailedCommands(t *testing.T) {
+	conn, r, s := testServer(t)
+
+	// SET with missing value returns a RESP error, which increments FailedCommands.
+	writeLine(t, conn, "SET onlykey")
+	got := readResp(t, r, conn)
+	if len(got) == 0 || got[0] != '-' {
+		t.Fatalf("expected error response, got %q", got)
+	}
+
+	stats := s.GetStats()
+	if stats.FailedCommands < 1 {
+		t.Errorf("FailedCommands = %d, want >= 1", stats.FailedCommands)
+	}
+}
