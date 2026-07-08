@@ -52,6 +52,13 @@ type pubSubStats struct {
 	messagesPublished atomic.Int64
 }
 
+type Persistence interface {
+	Append(name constants.CmdName, args []string) error
+	Checkpoint(map[string]SnapshotEntry) error
+	CheckpointSuccess() error
+	RebaseLine(map[string]SnapshotEntry) error
+}
+
 type Store struct {
 	data          map[string]*entry        // Real data of key value
 	cmdChan       chan Command             // Command channel which Event Loop interacts with
