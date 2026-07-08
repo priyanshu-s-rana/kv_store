@@ -1,6 +1,7 @@
 package store
 
 import (
+	"log"
 	"sync"
 	"time"
 
@@ -38,6 +39,13 @@ type ttlItem struct {
 	expiresAt time.Time
 }
 
+type Persistence interface {
+	Append(name constants.CmdName, args []string) error
+	Checkpoint(map[string]SnapshotEntry) error
+	CheckpointSuccess() error
+	RebaseLine(map[string]SnapshotEntry) error
+}
+
 type Store struct {
 	data          map[string]*entry        // Real data of key value
 	cmdChan       chan Command             // Command channel which Event Loop interacts with
@@ -47,13 +55,14 @@ type Store struct {
 	snapResp      chan SnapshotResponse    // Channel for snapshot responses
 	lru           *lru.LRU                 // LRU key eviction when memory is full
 	memoryProfile *MemoryProfile           // Memory Profiling to keep track of size
+	persistence   Persistence
 }
 
 // New creates and returns a Store with its event loop and TTL eviction goroutines running.
-func New(memorySize int64) *Store {
+func New(memorySize int64, cmdChan chan Command, persistence Persistence) *Store {
 	store := &Store{
 		data:    make(map[string]*entry),
-		cmdChan: make(chan Command),
+		cmdChan: cmdChan,
 		ttls: heap.New[ttlItem](func(a, b ttlItem) bool {
 			return a.expiresAt.Before(b.expiresAt)
 		}),
@@ -61,60 +70,31 @@ func New(memorySize int64) *Store {
 		snapResp:      make(chan SnapshotResponse, 1),
 		lru:           lru.New(),
 		memoryProfile: NewMemProfile(memorySize),
-	}
 
-	go store.eventLoop()
-	go store.ttlEviction()
+		persistence: persistence,
+	}
 
 	return store
 }
 
-// CmdChan returns a write-only channel for submitting commands to the event loop.
-func (store *Store) CmdChan() chan<- Command {
-	return store.cmdChan
+func (store *Store) Start() {
+	go store.eventLoop()
+	go store.ttlEviction()
 }
 
 // eventLoop processes commands from cmdChan sequentially, ensuring single-threaded data access.
 func (store *Store) eventLoop() {
 	for cmd := range store.cmdChan {
 		var resp Response
-		switch cmd.Name {
-		case constants.Ping:
-			resp = store.ping()
-		case constants.Set:
-			resp = store.set(cmd.Args)
-		case constants.Get:
-			resp = store.get(cmd.Args)
-		case constants.Del:
-			resp = store.del(cmd.Args)
-		case constants.TTL:
-			resp = store.ttl(cmd.Args)
-		case constants.Expire:
-			resp = store.expire(cmd.Args)
-		case constants.Publish:
-			resp = store.publish(cmd.Args)
-		case constants.Keys:
-			resp = store.keys(cmd.Args)
-		case constants.FlushAll:
-			resp = store.flushAll()
-		case constants.MemoryStats:
-			resp = store.memoryStats()
-		case constants.Mget:
-			resp = store.mget(cmd.Args)
-		case constants.Mset:
-			resp = store.mset(cmd.Args)
-		case constants.Incr:
-			resp = store.incr(cmd.Args)
-		case constants.Decr:
-			resp = store.decr(cmd.Args)
-		case constants.EVICT:
-			store.evict()
-			continue
-		case constants.Snapshot:
-			store.snapshot()
-			continue
-		default:
+		cmdMeta, ok := Registry[cmd.Name]
+		if !ok {
 			resp = store._default(cmd)
+		} else {
+			resp = cmdMeta.Handler(store, cmd.Args)
+			if cmdMeta.IsWrite && !cmd.SkipAof {
+				log.Printf("[Store] Appending command to AOF: %v", cmd)
+				store.persistence.Append(cmd.Name, cmd.Args)
+			}
 		}
 
 		select {
@@ -131,7 +111,7 @@ func (store *Store) ttlEviction() {
 
 	for range ticker.C {
 		store.cmdChan <- Command{
-			Name: "_EVICT",
+			Name: constants.EVICT,
 			Resp: make(chan Response, 1),
 		}
 	}

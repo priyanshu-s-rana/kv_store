@@ -8,10 +8,17 @@ type CFG struct {
 		Host string `mapstructure:"host"`
 		Port string `mapstructure:"port"`
 	} `mapstructure:"server"`
-	Snapshot struct {
-		Path     string        `mapstructure:"path"`
-		Interval time.Duration `mapstructure:"interval"`
-	} `mapstructure:"snapshot"`
+	Persistence struct {
+		Journal struct {
+			Path1  string `mapstructure:"path1"`
+			Path2  string `mapstructure:"path2"`
+			Policy string `mapstructure:"policy"`
+		} `mapstructure:"journal"`
+		Snapshot struct {
+			Path     string        `mapstructure:"path"`
+			Interval time.Duration `mapstructure:"interval"`
+		} `mapstructure:"snapshot"`
+	} `mapstructure:"persistence"`
 	Memory struct {
 		MaxSize int64 `mapstructure:"max_size"`
 	} `mapstructure:"memory"`
