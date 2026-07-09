@@ -31,7 +31,9 @@ func (s *Store) capture() (map[string]SnapshotEntry, error) {
 		if e.isExpired() {
 			continue
 		}
-		data[k] = SnapshotEntry{Value: e.value, Expiry: e.expiry}
+		value := make([]byte, len(e.value))
+		copy(value, e.value)
+		data[k] = SnapshotEntry{Value: value, Expiry: e.expiry}
 	}
 
 	return data, nil

@@ -81,14 +81,14 @@ func (aof *AOF) Initialize(gen uint64) error {
 	return aof.writeHeader(gen)
 }
 
-func (aof *AOF) Replay(cmdChan chan<- Command, sequenceID uint64) (bool, uint64, error) {
+func (aof *AOF) Replay(cmdChan chan<- Command, snapshotSequenceID uint64) (bool, uint64, error) {
 	if _, err := aof.file.Seek(0, io.SeekStart); err != nil {
-		return false, sequenceID, err
+		return false, snapshotSequenceID, err
 	}
 
 	p := parser.New(aof.file)
 	replayCounter := 0
-	latestSquenceID := sequenceID
+	latestSquenceID := snapshotSequenceID
 	for {
 		cmd, err := p.ReadCommand()
 		if err != nil {
@@ -107,7 +107,7 @@ func (aof *AOF) Replay(cmdChan chan<- Command, sequenceID uint64) (bool, uint64,
 			if err != nil {
 				return replayCounter > 0, latestSquenceID, err
 			}
-			if sequenceID >= cmdSequenceID {
+			if snapshotSequenceID >= cmdSequenceID {
 				continue
 			}
 

@@ -92,13 +92,16 @@ func (j *Journal) Replay(snapshotFile *snapshotFile, cmd chan<- Command) (bool, 
 	latestSequenceID := snapshotFile.LastSequenceID
 	replayed := false
 	for _, aofMeta := range aofsMetadata {
-		isReplayed := false
-		if aofMeta.Generation > snapshotFile.Generation {
-			var err error
-			if isReplayed, latestSequenceID, err = aofMeta.aof.Replay(cmd, latestSequenceID); err != nil {
-				return false, err
-			}
+		if aofMeta.Generation < snapshotFile.Generation {
+			continue
 		}
+
+		var err error
+		isReplayed := false
+		if isReplayed, latestSequenceID, err = aofMeta.aof.Replay(cmd, latestSequenceID); err != nil {
+			return false, err
+		}
+
 		replayed = replayed || isReplayed
 	}
 

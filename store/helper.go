@@ -2,6 +2,7 @@ package store
 
 import (
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 	"time"
@@ -137,6 +138,9 @@ func incrBy(s *Store, key string, delta int) Response {
 	}
 	value, err := strconv.Atoi(string(valueEntry.value))
 	if err != nil {
+		return Response{Value: parser.Error(constants.NOT_INTEGER)}
+	}
+	if (delta > 0 && value > math.MaxInt64-delta) || (delta < 0 && value < math.MinInt64-delta) {
 		return Response{Value: parser.Error(constants.NOT_INTEGER)}
 	}
 	value += delta

@@ -14,13 +14,31 @@ import (
 	"github.com/priyanshu-s-rana/kv_store/store"
 )
 
+// fakePersistence is a no-op store.Persistence used to run a real store
+// event loop in tests without touching disk.
+type fakePersistence struct{}
+
+func (fakePersistence) Append(constants.CmdName, []string) error        { return nil }
+func (fakePersistence) Checkpoint(map[string]store.SnapshotEntry) error { return nil }
+func (fakePersistence) CheckpointSuccess() error                        { return nil }
+func (fakePersistence) RebaseLine(map[string]store.SnapshotEntry) error { return nil }
+
+// newTestStore builds a Store with its event loop running against a fresh
+// command channel wired to a no-op Persistence.
+func newTestStore() (*store.Store, chan store.Command) {
+	cmdChan := make(chan store.Command)
+	st := store.New(0, cmdChan, fakePersistence{})
+	st.Start()
+	return st, cmdChan
+}
+
 // testConn creates an in-memory server/client pair using net.Pipe.
 // handleConnection runs in a goroutine on the server side.
 // t.Cleanup closes the client connection.
 func testConn(t *testing.T) (net.Conn, *bufio.Reader) {
 	t.Helper()
-	st := store.New(0)
-	s := New("", st)
+	st, cmdChan := newTestStore()
+	s := New("", cmdChan, st)
 	client, srv := net.Pipe()
 	t.Cleanup(func() { client.Close() })
 	go s.handleConnection(srv)
@@ -199,8 +217,8 @@ func TestClientDisconnect(t *testing.T) {
 // ---- PUB/SUB ----
 
 func TestSubscribeAndPublish(t *testing.T) {
-	st := store.New(0)
-	s := New("", st)
+	st, cmdChan := newTestStore()
+	s := New("", cmdChan, st)
 
 	subConn, subSrv := net.Pipe()
 	t.Cleanup(func() { subConn.Close() })
