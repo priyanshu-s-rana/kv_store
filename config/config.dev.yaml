@@ -2,9 +2,14 @@ SERVER:
   HOST: "localhost"
   PORT: "5040"
 
-SNAPSHOT:
-  PATH: "./data/dump.gob"
-  INTERVAL: 60s
+PERSISTENCE:
+  JOURNAL:
+    PATH1: "./data/journal_0.aof"
+    PATH2: "./data/journal_1.aof"
+    POLICY: "everysec"
+  SNAPSHOT:
+    PATH: "./data/dump.gob"
+    INTERVAL: 60s
 
 MEMORY:
   MAX_SIZE: 0 # bytes, 0 = unlimited

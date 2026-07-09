@@ -13,7 +13,7 @@ import (
 )
 
 // PING command returns PONG, used to check server liveness.
-func (s *Store) ping() Response {
+func (s *Store) ping(_ []string) Response {
 	return Response{Value: parser.SimpleString(constants.PONG)}
 }
 
@@ -198,7 +198,7 @@ func (s *Store) publish(args []string) Response {
 }
 
 // evict removes all expired keys whose TTL entries have reached the front of the heap.
-func (s *Store) evict() {
+func (s *Store) evict(_ []string) Response {
 	now := time.Now()
 	for s.ttls.Len() > 0 {
 		item, ok := s.ttls.Peek()
@@ -213,22 +213,7 @@ func (s *Store) evict() {
 			s.publish([]string{"lock-released:" + item.key, "released"})
 		}
 	}
-}
-
-// snapshot captures a point-in-time copy of the store and sends it on snapResp.
-func (s *Store) snapshot() {
-	snapshotData := make(map[string]snapshotEntry, len(s.data))
-	for key, e := range s.data {
-		snapshotData[key] = snapshotEntry{
-			Value:  e.value,
-			Expiry: e.expiry,
-		}
-	}
-
-	select {
-	case s.snapResp <- SnapshotResponse{data: snapshotData, err: nil}:
-	default:
-	}
+	return Response{}
 }
 
 // KEYS command returns all keys matching the given glob-style pattern.
@@ -252,7 +237,7 @@ func (s *Store) keys(args []string) Response {
 
 // FLUSHALL command deletes all keys and resets the TTL heap and LRU.
 // @returns OK: always.
-func (s *Store) flushAll() Response {
+func (s *Store) flushAll(_ []string) Response {
 	clear(s.data)
 	s.ttls = heap.New[ttlItem](func(a, b ttlItem) bool {
 		return a.expiresAt.Before(b.expiresAt)
@@ -263,7 +248,7 @@ func (s *Store) flushAll() Response {
 }
 
 // MEMORY STATS command returns a flat array of memory metric key-value pairs.
-func (s *Store) memoryStats() Response {
+func (s *Store) memoryStats(_ []string) Response {
 	return Response{Value: parser.BulkString(s.memoryProfile.getStats())}
 }
 
@@ -314,4 +299,39 @@ func (s *Store) decr(args []string) Response {
 		return Response{Value: parser.Error(fmt.Sprintf(constants.WRONG_NUM_ARGS, constants.Decr))}
 	}
 	return incrBy(s, args[0], -1)
+}
+
+// snapshot is the event-loop handler for the internal Snapshot command. It captures
+// a copy of the live (non-expired) data and hands it back on snapResp.
+func (s *Store) checkpoint(_ []string) Response {
+	snapshot, err := s.capture()
+	if err != nil {
+		return Response{Value: parser.Error(fmt.Sprintf(constants.CAPTURE_ERROR, err))}
+	}
+
+	if err := s.persistence.Checkpoint(snapshot); err != nil {
+		return Response{Value: parser.Error(fmt.Sprintf(constants.CHECKPOINT_ERROR, err))}
+	}
+
+	return Response{Value: parser.SimpleString(constants.OK)}
+}
+
+func (s *Store) checkpointSuccess(_ []string) Response {
+	if err := s.persistence.CheckpointSuccess(); err != nil {
+		return Response{Value: parser.Error(constants.CHECKPOINT_FAILED)}
+	}
+	return Response{Value: parser.SimpleString(constants.OK)}
+}
+
+func (s *Store) rebaseline(_ []string) Response {
+	snapshot, err := s.capture()
+	if err != nil {
+		return Response{Value: parser.Error(fmt.Sprintf(constants.CAPTURE_ERROR, err))}
+	}
+
+	if err := s.persistence.RebaseLine(snapshot); err != nil {
+		return Response{Value: parser.Error(constants.REBASELINE_ERROR)}
+	}
+
+	return Response{Value: parser.SimpleString(constants.OK)}
 }

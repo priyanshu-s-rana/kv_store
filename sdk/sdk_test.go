@@ -8,17 +8,29 @@ import (
 	"testing"
 	"time"
 
+	"github.com/priyanshu-s-rana/kv_store/constants"
 	"github.com/priyanshu-s-rana/kv_store/server"
 	"github.com/priyanshu-s-rana/kv_store/store"
 )
 
 const testAddr = "localhost:15040"
 
+// fakePersistence is a no-op store.Persistence used to run a real store
+// event loop in tests without touching disk.
+type fakePersistence struct{}
+
+func (fakePersistence) Append(constants.CmdName, []string) error        { return nil }
+func (fakePersistence) Checkpoint(map[string]store.SnapshotEntry) error { return nil }
+func (fakePersistence) CheckpointSuccess() error                        { return nil }
+func (fakePersistence) RebaseLine(map[string]store.SnapshotEntry) error { return nil }
+
 // TestMain starts a real kv-server on testAddr before any test runs and stops
 // it when all tests finish.
 func TestMain(m *testing.M) {
-	st := store.New(0)
-	srv := server.New(testAddr, st)
+	cmdChan := make(chan store.Command)
+	st := store.New(0, cmdChan, fakePersistence{})
+	st.Start()
+	srv := server.New(testAddr, cmdChan, st)
 	go srv.Start()
 
 	// Wait until the server is ready.

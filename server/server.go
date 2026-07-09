@@ -20,10 +20,10 @@ type Server struct {
 
 // New creates a Server bound to addr, wiring it to store's command channel.
 // @returns *Server: ready to accept connections via Start.
-func New(addr string, store *store.Store) *Server {
+func New(addr string, cmdChan chan<- models.Command, store *store.Store) *Server {
 	return &Server{
 		addr:    addr,
-		cmdChan: store.CmdChan(),
+		cmdChan: cmdChan,
 		store:   store,
 	}
 }

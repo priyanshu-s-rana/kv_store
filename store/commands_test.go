@@ -47,7 +47,7 @@ func respBulk(s string) string   { return fmt.Sprintf("$%d\r\n%s\r\n", len(s), s
 
 func TestPing(t *testing.T) {
 	s := newTestStore()
-	assertValue(t, s.ping(), respSimple(constants.PONG))
+	assertValue(t, s.ping(nil), respSimple(constants.PONG))
 }
 
 // ---- GET ----
@@ -471,7 +471,7 @@ func TestEvictRemovesExpired(t *testing.T) {
 	s.ttls.Push(ttlItem{key: "expired2", expiresAt: s.data["expired2"].expiry})
 	s.ttls.Push(ttlItem{key: "alive", expiresAt: s.data["alive"].expiry})
 
-	s.evict()
+	s.evict(nil)
 
 	if _, ok := s.data["expired1"]; ok {
 		t.Errorf("expired1 should be removed")
@@ -489,7 +489,7 @@ func TestEvictRemovesExpired(t *testing.T) {
 
 func TestEvictEmptyHeap(t *testing.T) {
 	s := newTestStore()
-	s.evict() // should not panic or block
+	s.evict(nil) // should not panic or block
 }
 
 func TestEvictPublishesLockReleased(t *testing.T) {
@@ -500,7 +500,7 @@ func TestEvictPublishesLockReleased(t *testing.T) {
 	s.ttls.Push(ttlItem{key: "expired", expiresAt: s.data["expired"].expiry})
 
 	ch := s.Subscribe("lock-released:expired")
-	s.evict()
+	s.evict(nil)
 
 	select {
 	case msg := <-ch:
@@ -526,7 +526,7 @@ func TestEvictSkipsStaleHeapEntry(t *testing.T) {
 	// Heap has the stale entry (simulating an earlier EX that got overwritten)
 	s.ttls.Push(ttlItem{key: "k", expiresAt: staleExpiry})
 
-	s.evict()
+	s.evict(nil)
 
 	if _, ok := s.data["k"]; !ok {
 		t.Errorf("key was deleted by stale heap entry — staleness check failed")
@@ -540,7 +540,7 @@ func TestEvictRemovesHeapEntryEvenIfKeyAlreadyDeleted(t *testing.T) {
 	// Heap has an entry but the data was already removed (e.g. via DEL)
 	s.ttls.Push(ttlItem{key: "ghost", expiresAt: now.Add(-1 * time.Second)})
 
-	s.evict()
+	s.evict(nil)
 
 	if s.ttls.Len() != 0 {
 		t.Errorf("orphan heap entry not cleaned up, len = %d", s.ttls.Len())
@@ -554,7 +554,7 @@ func TestEvictStopsAtFirstAlive(t *testing.T) {
 	s.data["future"] = &entry{value: []byte("a"), expiry: now.Add(5 * time.Second)}
 	s.ttls.Push(ttlItem{key: "future", expiresAt: s.data["future"].expiry})
 
-	s.evict()
+	s.evict(nil)
 
 	if _, ok := s.data["future"]; !ok {
 		t.Errorf("future-expiring key should remain")
@@ -578,7 +578,7 @@ func TestEvictDecrementsttlBytes(t *testing.T) {
 		t.Fatal("ttlBytes should be > 0 before eviction")
 	}
 
-	s.evict()
+	s.evict(nil)
 
 	if s.memoryProfile.ttlBytes >= before {
 		t.Errorf("ttlBytes not decremented after evict: before=%d after=%d", before, s.memoryProfile.ttlBytes)
@@ -690,7 +690,7 @@ func TestFlushAll(t *testing.T) {
 	s.data["k2"] = &entry{value: []byte("v2"), expiry: time.Now().Add(time.Hour)}
 	s.ttls.Push(ttlItem{key: "k2", expiresAt: s.data["k2"].expiry})
 
-	assertValue(t, s.flushAll(), respSimple(constants.OK))
+	assertValue(t, s.flushAll(nil), respSimple(constants.OK))
 
 	if len(s.data) != 0 {
 		t.Errorf("data not cleared, len = %d", len(s.data))
@@ -702,7 +702,7 @@ func TestFlushAll(t *testing.T) {
 
 func TestFlushAllEmptyStore(t *testing.T) {
 	s := newTestStore()
-	assertValue(t, s.flushAll(), respSimple(constants.OK))
+	assertValue(t, s.flushAll(nil), respSimple(constants.OK))
 }
 
 // ---- Memory Profile ----
@@ -860,7 +860,7 @@ func TestFlushAllClearsLRU(t *testing.T) {
 	s.set([]string{"k1", "v1"})
 	s.set([]string{"k2", "v2"})
 
-	s.flushAll()
+	s.flushAll(nil)
 
 	if s.lru.GetNode("k1") != nil {
 		t.Errorf("LRU still has k1 after flushAll")
@@ -880,7 +880,7 @@ func TestFlushAllClearsLRU(t *testing.T) {
 // statsBody strips the RESP bulk-string framing and returns the raw stat lines.
 func statsBody(t *testing.T, s *Store) string {
 	t.Helper()
-	raw := string(s.memoryStats().Value)
+	raw := string(s.memoryStats(nil).Value)
 	first := strings.Index(raw, "\r\n")
 	if first == -1 {
 		t.Fatalf("memoryStats: not a bulk string: %q", raw)
@@ -1033,76 +1033,89 @@ func TestMemoryStatsMaxSizeReflectsLimit(t *testing.T) {
 
 // ---- SNAPSHOT ----
 
-// Verifies snapshot copies every key's value and expiry into the response
-// map and delivers it on the snapResp channel.
+// Verifies capture copies every key's value and expiry into the returned map.
 func TestSnapshotCopiesData(t *testing.T) {
 	s := newTestStore()
-	s.snapResp = make(chan SnapshotResponse, 1)
 
 	expiry := time.Now().Add(time.Hour)
 	s.data["k1"] = &entry{value: []byte("v1")}
 	s.data["k2"] = &entry{value: []byte("v2"), expiry: expiry}
 
-	s.snapshot()
-
-	resp := <-s.snapResp
-	if resp.err != nil {
-		t.Fatalf("snapshot err = %v, want nil", resp.err)
+	data, err := s.capture()
+	if err != nil {
+		t.Fatalf("capture err = %v, want nil", err)
 	}
-	if len(resp.data) != 2 {
-		t.Fatalf("snapshot len = %d, want 2", len(resp.data))
+	if len(data) != 2 {
+		t.Fatalf("capture len = %d, want 2", len(data))
 	}
-	if string(resp.data["k1"].Value) != "v1" {
-		t.Errorf("k1 value = %q, want %q", resp.data["k1"].Value, "v1")
+	if string(data["k1"].Value) != "v1" {
+		t.Errorf("k1 value = %q, want %q", data["k1"].Value, "v1")
 	}
-	if !resp.data["k1"].Expiry.IsZero() {
-		t.Errorf("k1 expiry = %v, want zero", resp.data["k1"].Expiry)
+	if !data["k1"].Expiry.IsZero() {
+		t.Errorf("k1 expiry = %v, want zero", data["k1"].Expiry)
 	}
-	if string(resp.data["k2"].Value) != "v2" {
-		t.Errorf("k2 value = %q, want %q", resp.data["k2"].Value, "v2")
+	if string(data["k2"].Value) != "v2" {
+		t.Errorf("k2 value = %q, want %q", data["k2"].Value, "v2")
 	}
-	if !resp.data["k2"].Expiry.Equal(expiry) {
-		t.Errorf("k2 expiry = %v, want %v", resp.data["k2"].Expiry, expiry)
+	if !data["k2"].Expiry.Equal(expiry) {
+		t.Errorf("k2 expiry = %v, want %v", data["k2"].Expiry, expiry)
 	}
 }
 
-// Verifies snapshotting an empty store yields an empty (non-nil) map.
+// Verifies capturing an empty store yields an empty (non-nil) map.
 func TestSnapshotEmptyStore(t *testing.T) {
 	s := newTestStore()
-	s.snapResp = make(chan SnapshotResponse, 1)
 
-	s.snapshot()
-
-	resp := <-s.snapResp
-	if resp.err != nil {
-		t.Fatalf("snapshot err = %v, want nil", resp.err)
+	data, err := s.capture()
+	if err != nil {
+		t.Fatalf("capture err = %v, want nil", err)
 	}
-	if resp.data == nil {
-		t.Fatalf("snapshot data is nil, want empty map")
+	if data == nil {
+		t.Fatalf("capture data is nil, want empty map")
 	}
-	if len(resp.data) != 0 {
-		t.Errorf("snapshot len = %d, want 0", len(resp.data))
+	if len(data) != 0 {
+		t.Errorf("capture len = %d, want 0", len(data))
 	}
 }
 
-// Verifies the snapshot map is independent of the live store: mutating
-// s.data after the snapshot does not change the captured response.
+// Verifies the captured map is independent of the live store: mutating
+// s.data after capture does not change the captured result.
 func TestSnapshotIsDecoupledFromStore(t *testing.T) {
 	s := newTestStore()
-	s.snapResp = make(chan SnapshotResponse, 1)
 	s.data["k"] = &entry{value: []byte("v")}
 
-	s.snapshot()
-	resp := <-s.snapResp
+	data, err := s.capture()
+	if err != nil {
+		t.Fatalf("capture err = %v, want nil", err)
+	}
 
 	// Add a new key after the snapshot was taken.
 	s.data["new"] = &entry{value: []byte("late")}
 
-	if _, ok := resp.data["new"]; ok {
-		t.Errorf("snapshot captured a key added after snapshot()")
+	if _, ok := data["new"]; ok {
+		t.Errorf("capture captured a key added after capture()")
 	}
-	if len(resp.data) != 1 {
-		t.Errorf("snapshot len = %d, want 1", len(resp.data))
+	if len(data) != 1 {
+		t.Errorf("capture len = %d, want 1", len(data))
+	}
+}
+
+// Verifies capture deep-copies value bytes, not just the map: mutating the
+// live entry's underlying byte slice after capture must not corrupt the
+// already-captured snapshot.
+func TestSnapshotCaptureDeepCopiesValueBytes(t *testing.T) {
+	s := newTestStore()
+	s.data["k"] = &entry{value: []byte("value")}
+
+	data, err := s.capture()
+	if err != nil {
+		t.Fatalf("capture err = %v, want nil", err)
+	}
+
+	s.data["k"].value[0] = 'X'
+
+	if string(data["k"].Value) != "value" {
+		t.Errorf("captured value = %q, want %q (capture must not alias the live entry's bytes)", data["k"].Value, "value")
 	}
 }
 
@@ -1134,6 +1147,24 @@ func TestMSetOddArgsError(t *testing.T) {
 	resp := s.mset([]string{"k1", "v1", "k2"})
 	want := respError(fmt.Sprintf(constants.WRONG_NUM_ARGS, constants.Mset))
 	assertValue(t, resp, want)
+}
+
+// Verifies MSET validates all arguments before writing anything: an invalid
+// (odd-length) MSET must not create any new keys or disturb existing data.
+func TestMSetOddArgsDoesNotPartiallyApply(t *testing.T) {
+	s := newTestStore()
+	s.set([]string{"sentinel", "untouched"})
+
+	resp := s.mset([]string{"sentinel", "clobbered", "k1", "v1", "k2"})
+	want := respError(fmt.Sprintf(constants.WRONG_NUM_ARGS, constants.Mset))
+	assertValue(t, resp, want)
+
+	if string(s.data["sentinel"].value) != "untouched" {
+		t.Errorf("sentinel = %q, want untouched (invalid MSET must not modify existing data)", s.data["sentinel"].value)
+	}
+	if len(s.data) != 1 {
+		t.Errorf("data len = %d, want 1 (no new keys from an invalid MSET)", len(s.data))
+	}
 }
 
 func TestMSetWrongArgs(t *testing.T) {
@@ -1262,6 +1293,15 @@ func TestIncrWrongArgs(t *testing.T) {
 	assertValue(t, resp, want)
 }
 
+// Verifies INCR on a MaxInt64-valued key reports an error instead of
+// silently wrapping to a negative number. NOT_INTEGER already documents the
+// "or out of range" contract this exercises.
+func TestIncrOverflowReturnsError(t *testing.T) {
+	s := newTestStore()
+	s.data["k"] = &entry{value: []byte("9223372036854775807")} // math.MaxInt64
+	assertValue(t, s.incr([]string{"k"}), respError(constants.NOT_INTEGER))
+}
+
 // ---- DECR ----
 
 func TestDecrMissingKeyInitialisesToMinusOne(t *testing.T) {
@@ -1308,4 +1348,12 @@ func TestDecrWrongArgs(t *testing.T) {
 	resp := s.decr([]string{})
 	want := respError(fmt.Sprintf(constants.WRONG_NUM_ARGS, constants.Decr))
 	assertValue(t, resp, want)
+}
+
+// Verifies DECR on a MinInt64-valued key reports an error instead of
+// silently wrapping to a positive number.
+func TestDecrOverflowReturnsError(t *testing.T) {
+	s := newTestStore()
+	s.data["k"] = &entry{value: []byte("-9223372036854775808")} // math.MinInt64
+	assertValue(t, s.decr([]string{"k"}), respError(constants.NOT_INTEGER))
 }
