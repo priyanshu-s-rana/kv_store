@@ -92,7 +92,6 @@ func (store *Store) eventLoop() {
 		} else {
 			resp = cmdMeta.Handler(store, cmd.Args)
 			if cmdMeta.IsWrite && !cmd.SkipAof {
-				log.Printf("[Store] Appending command to AOF: %v", cmd)
 				store.persistence.Append(cmd.Name, cmd.Args)
 			}
 		}
