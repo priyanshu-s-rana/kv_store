@@ -1,69 +1,44 @@
 package store
 
-import "time"
+import (
+	"time"
 
-// ======== MEMORY STATS ========
-type MemoryStats struct {
-	CurrentBytes int64
-	PeakBytes    int64
-	MaxBytes     int64
-	Utilization  float32
+	"github.com/priyanshu-s-rana/kv_store/constants"
+)
 
-	KeyCount int64
+// StoreMetrics is the domain-level metrics contract for the Store subsystem.
+// Implementations translate these events/state changes into an observability
+// backend (e.g. Prometheus); the Store package has no knowledge of that backend.
+type StoreMetrics interface {
+	// Commands
+	// The Store executes commands handed to it by the event loop; it does not
+	// receive them off the wire (that is the Server's responsibility).
+	IncCommandsExecuted(constants.CmdName)
+	IncCommandFailures(constants.CmdName)
 
-	KeyBytes    int64
-	ValueBytes  int64
-	TTLBytes    int64
-	LRUBytes    int64
-	PubSubBytes int64
-}
+	// Time spent executing a command inside the Store.
+	// This excludes parsing, networking, persistence, etc.
+	ObserveCommandDuration(constants.CmdName, time.Duration)
 
-// GetStats returns a plain snapshot of the current memory profile.
-func (memProf *MemoryProfile) GetStats() MemoryStats {
-	current := memProf.currentMemorySize()
-	var utilization float32
-	if memProf.maxBytes > 0 {
-		utilization = float32(current) / float32(memProf.maxBytes) * 100
-	}
-	return MemoryStats{
-		CurrentBytes: current,
-		PeakBytes:    memProf.peakBytes,
-		MaxBytes:     memProf.maxBytes,
-		Utilization:  utilization,
-		KeyCount:     memProf.keyCount,
-		KeyBytes:     memProf.keyBytes,
-		ValueBytes:   memProf.valueBytes,
-		TTLBytes:     memProf.ttlBytes,
-		LRUBytes:     memProf.lruBytes,
-		PubSubBytes:  memProf.pubsubBytes,
-	}
-}
+	// Memory
+	SetCurrentMemoryBytes(int64)
+	SetPeakMemoryBytes(int64)
+	SetMaxMemoryBytes(int64)
+	SetMemoryUtilization(float32)
+	SetKeyCount(int64)
+	SetKeyBytes(int64)
+	SetValueBytes(int64)
+	SetTTLBytes(int64)
+	SetLRUBytes(int64)
+	SetPubSubBytes(int64)
 
-// ======== SNAPSHOT STATS ========
-type SnapshotStats struct {
-	SnapshotCount        int64
-	SnapshotFailures     int64
-	SnapshotInProgress   bool
-	LastSnapshotTime     time.Time
-	LastSnapshotDuration time.Duration
-	SnapshotSizeBytes    int64
-}
+	// TTL
+	IncExpiredKeys()
+	ObserveTTLExpiryDuration(time.Duration)
 
-func (snpStats *SnapshotStats) GetStats() SnapshotStats {
-	return *snpStats
-}
-
-// ======== PUB/SUB STATS ========
-type PubSubStats struct {
-	ActiveTopics      int64
-	ActiveSubscribers int64
-	MessagesPublished int64
-}
-
-func (pubSubStats *pubSubStats) GetStats() PubSubStats {
-	return PubSubStats{
-		ActiveTopics:      pubSubStats.activeTopics.Load(),
-		ActiveSubscribers: pubSubStats.activeSubscribers.Load(),
-		MessagesPublished: pubSubStats.messagesPublished.Load(),
-	}
+	// Pub/Sub
+	SetActiveTopics(int64)
+	SetActiveSubscribers(int64)
+	IncMessagesPublished()
+	ObservePublishDuration(time.Duration)
 }

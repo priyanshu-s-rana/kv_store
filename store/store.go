@@ -39,24 +39,36 @@ type ttlItem struct {
 	expiresAt time.Time
 }
 
-type Persistence interface {
-	Append(name constants.CmdName, args []string) error
-	Checkpoint(map[string]SnapshotEntry) error
-	CheckpointSuccess() error
-	RebaseLine(map[string]SnapshotEntry) error
-}
-
 type pubSubStats struct {
 	activeTopics      atomic.Int64
 	activeSubscribers atomic.Int64
-	messagesPublished atomic.Int64
+	metrics           StoreMetrics
+}
+
+func (p *pubSubStats) incActiveTopics() {
+	p.activeTopics.Add(1)
+	p.metrics.SetActiveTopics(p.activeTopics.Load())
+}
+
+func (p *pubSubStats) decActiveTopics() {
+	p.activeTopics.Add(-1)
+	p.metrics.SetActiveTopics(p.activeTopics.Load())
+}
+
+func (p *pubSubStats) incActiveSubscribers() {
+	p.activeSubscribers.Add(1)
+	p.metrics.SetActiveSubscribers(p.activeSubscribers.Load())
+}
+
+func (p *pubSubStats) decActiveSubscribers() {
+	p.activeSubscribers.Add(-1)
+	p.metrics.SetActiveSubscribers(p.activeSubscribers.Load())
 }
 
 type Persistence interface {
 	Append(name constants.CmdName, args []string) error
 	Checkpoint(map[string]SnapshotEntry) error
-	CheckpointSuccess() error
-	RebaseLine(map[string]SnapshotEntry) error
+	Rebaseline(map[string]SnapshotEntry) error
 }
 
 type Store struct {
@@ -70,10 +82,11 @@ type Store struct {
 	memoryProfile *MemoryProfile           // Memory Profiling to keep track of size
 	persistence   Persistence
 	pubSubStats   *pubSubStats
+	metrics       StoreMetrics
 }
 
 // New creates and returns a Store with its event loop and TTL eviction goroutines running.
-func New(memorySize int64, cmdChan chan Command, persistence Persistence) *Store {
+func New(memorySize int64, cmdChan chan Command, persistence Persistence, metrics StoreMetrics) *Store {
 	store := &Store{
 		data:    make(map[string]*entry),
 		cmdChan: cmdChan,
@@ -83,9 +96,10 @@ func New(memorySize int64, cmdChan chan Command, persistence Persistence) *Store
 		pubsub:        make(map[string][]chan []byte),
 		snapResp:      make(chan SnapshotResponse, 1),
 		lru:           lru.New(),
-		memoryProfile: NewMemProfile(memorySize),
-		pubSubStats:   &pubSubStats{},
+		memoryProfile: NewMemProfile(memorySize, metrics),
+		pubSubStats:   &pubSubStats{metrics: metrics},
 		persistence:   persistence,
+		metrics:       metrics,
 	}
 
 	return store
@@ -99,6 +113,9 @@ func (store *Store) Start() {
 // eventLoop processes commands from cmdChan sequentially, ensuring single-threaded data access.
 func (store *Store) eventLoop() {
 	for cmd := range store.cmdChan {
+		start := time.Now()
+		store.metrics.IncCommandsExecuted(cmd.Name)
+
 		var resp Response
 		cmdMeta, ok := Registry[cmd.Name]
 		if !ok {
@@ -108,6 +125,11 @@ func (store *Store) eventLoop() {
 			if cmdMeta.IsWrite && !cmd.SkipAof {
 				store.persistence.Append(cmd.Name, cmd.Args)
 			}
+		}
+
+		store.metrics.ObserveCommandDuration(cmd.Name, time.Since(start))
+		if err := resp.IsError(); err != nil {
+			store.metrics.IncCommandFailures(cmd.Name)
 		}
 
 		select {

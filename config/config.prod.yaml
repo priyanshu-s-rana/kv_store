@@ -2,6 +2,10 @@ SERVER:
   HOST: "0.0.0.0"
   PORT: "5040"
 
+METRICS:
+  HOST: "0.0.0.0"
+  PORT: "9090"
+
 PERSISTENCE:
   JOURNAL:
     PATH1: "/data/journal_0.aof"

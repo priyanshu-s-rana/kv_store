@@ -6,6 +6,7 @@ import (
 	"log"
 	"net"
 	"sync/atomic"
+	"time"
 
 	"github.com/priyanshu-s-rana/kv_store/constants"
 	"github.com/priyanshu-s-rana/kv_store/models"
@@ -13,30 +14,22 @@ import (
 	"github.com/priyanshu-s-rana/kv_store/store"
 )
 
-type serverStats struct {
-	activeConnections        atomic.Int64
-	totalConnectionsAccepted atomic.Int64
-	bytesSent                atomic.Int64
-	bytesReceived            atomic.Int64
-	parserErrors             atomic.Int64
-	commandsReceived         atomic.Int64
-	failedCommands           atomic.Int64
-}
-
 type Server struct {
-	addr    string
-	cmdChan chan<- models.Command
-	store   *store.Store
-	stats   serverStats
+	addr              string
+	cmdChan           chan<- models.Command
+	store             *store.Store
+	metrics           ServerMetrics
+	activeConnections atomic.Int64
 }
 
 // New creates a Server bound to addr, wiring it to store's command channel.
 // @returns *Server: ready to accept connections via Start.
-func New(addr string, cmdChan chan<- models.Command, store *store.Store) *Server {
+func New(addr string, cmdChan chan<- models.Command, store *store.Store, metrics ServerMetrics) *Server {
 	return &Server{
 		addr:    addr,
 		cmdChan: cmdChan,
 		store:   store,
+		metrics: metrics,
 	}
 }
 
@@ -49,14 +42,15 @@ func (s *Server) Start() error {
 		return fmt.Errorf("failed to start server on %s: %v", s.addr, err)
 	}
 
-	fmt.Printf("[server] listening on %s\n", s.addr)
+	log.Printf("[server] listening on %s\n", s.addr)
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
 			log.Printf("[server] accept error: %v\n", err)
 			continue
 		}
-		s.stats.activeConnections.Add(1)
+		s.activeConnections.Add(1)
+		s.metrics.SetActiveConnections(s.activeConnections.Load())
 		go s.handleConnection(conn)
 	}
 }
@@ -66,13 +60,15 @@ func (s *Server) Start() error {
 // SUBSCRIBE breaks out of the loop and hands control to handleSubscribe for the lifetime of the subscription.
 func (s *Server) handleConnection(conn net.Conn) {
 	defer func() {
-		s.stats.activeConnections.Add(-1)
+		s.activeConnections.Add(-1)
+		s.metrics.SetActiveConnections(s.activeConnections.Load())
+		s.metrics.IncConnectionsClosed()
 		conn.Close()
 	}()
 
 	remoteAddr := conn.RemoteAddr().String()
 	log.Printf("[server] client connected: %s\n", remoteAddr)
-	s.stats.totalConnectionsAccepted.Add(1)
+	s.metrics.IncConnectionsAccepted()
 	defer log.Printf("[server] client disconnected: %s\n", remoteAddr)
 
 	countingReader := &CountingReader{
@@ -83,16 +79,16 @@ func (s *Server) handleConnection(conn net.Conn) {
 	for {
 		cmd, err := p.ReadCommand()
 		current := countingReader.BytesRead()
-		s.stats.bytesReceived.Add(current - lastBytesRead)
+		s.metrics.IncBytesReceived(current - lastBytesRead)
 		lastBytesRead = current
 		if err != nil {
 			if err != io.EOF {
-				s.stats.parserErrors.Add(1)
+				s.metrics.IncParserErrors()
 				log.Printf("[server] error reading command from %s: %v\n", remoteAddr, err)
 			}
 			return
 		}
-		s.stats.commandsReceived.Add(1)
+		s.metrics.IncCommandsReceived(cmd.Name)
 
 		if cmd.Name == constants.Subscribe {
 			s.handleSubscribe(conn, cmd.Args)
@@ -101,6 +97,7 @@ func (s *Server) handleConnection(conn net.Conn) {
 
 		responseChan := make(chan models.Response, 1)
 
+		start := time.Now()
 		s.cmdChan <- models.Command{
 			Name: cmd.Name,
 			Args: cmd.Args,
@@ -108,8 +105,9 @@ func (s *Server) handleConnection(conn net.Conn) {
 		}
 
 		resp := <-responseChan
+		s.metrics.ObserveCommandDuration(cmd.Name, time.Since(start))
 		if len(resp.Value) > 0 && resp.Value[0] == '-' {
-			s.stats.failedCommands.Add(1)
+			s.metrics.IncFailedCommands(cmd.Name)
 		}
 		s.writeToConnection(conn, resp.Value)
 	}
@@ -120,7 +118,7 @@ func (s *Server) handleConnection(conn net.Conn) {
 // Cleans up all subscriptions via defer when the connection drops.
 func (s *Server) handleSubscribe(conn net.Conn, topics []string) {
 	if len(topics) == 0 {
-		s.stats.failedCommands.Add(1)
+		s.metrics.IncFailedCommands(constants.Subscribe)
 		s.writeToConnection(conn, parser.Error("SUBSCRIBE requires at least one topic"))
 		return
 	}
@@ -182,11 +180,13 @@ func (s *Server) forwardMessages(conn net.Conn, merged <-chan []byte) {
 }
 
 func (s *Server) writeToConnection(conn net.Conn, msg []byte) error {
+	start := time.Now()
 	bytesWritten, err := conn.Write(msg)
+	s.metrics.ObserveResponseWriteDuration(time.Since(start))
 	if err != nil {
 		log.Printf("[server] error writing to the connection at: %s", conn.RemoteAddr().String())
 		return err
 	}
-	s.stats.bytesSent.Add(int64(bytesWritten))
+	s.metrics.IncBytesSent(int64(bytesWritten))
 	return nil
 }

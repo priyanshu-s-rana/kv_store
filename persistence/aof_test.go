@@ -17,7 +17,7 @@ import (
 func newTestAOF(t *testing.T, policy string) (*AOF, string) {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "journal.aof")
-	aof, err := NewAOF(&AOFConfig{FilePath: path, SyncPolicy: policy})
+	aof, err := NewAOF(&AOFConfig{FilePath: path, SyncPolicy: policy}, noopPersistenceMetrics{})
 	if err != nil {
 		t.Fatalf("NewAOF: %v", err)
 	}

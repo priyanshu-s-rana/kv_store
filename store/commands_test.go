@@ -15,6 +15,7 @@ import (
 // newTestStore builds a Store without starting eventLoop/eviction goroutines,
 // so tests can call command methods synchronously and inspect state directly.
 func newTestStore() *Store {
+	metrics := newSpyStoreMetrics()
 	return &Store{
 		data: make(map[string]*entry),
 		ttls: heap.New[ttlItem](func(a, b ttlItem) bool {
@@ -22,8 +23,9 @@ func newTestStore() *Store {
 		}),
 		pubsub:        make(map[string][]chan []byte),
 		lru:           lru.New(),
-		memoryProfile: NewMemProfile(0),
-		pubSubStats:   &pubSubStats{},
+		memoryProfile: NewMemProfile(0, metrics),
+		pubSubStats:   &pubSubStats{metrics: metrics},
+		metrics:       metrics,
 	}
 }
 
@@ -460,35 +462,16 @@ func TestPublishWrongArgs(t *testing.T) {
 
 // ---- PUBSUB STATS ----
 
-func TestPubSubStatsGetStats(t *testing.T) {
-	ps := &pubSubStats{}
-	ps.activeTopics.Store(3)
-	ps.activeSubscribers.Store(7)
-	ps.messagesPublished.Store(42)
-
-	got := ps.GetStats()
-	if got.ActiveTopics != 3 {
-		t.Errorf("ActiveTopics = %d, want 3", got.ActiveTopics)
-	}
-	if got.ActiveSubscribers != 7 {
-		t.Errorf("ActiveSubscribers = %d, want 7", got.ActiveSubscribers)
-	}
-	if got.MessagesPublished != 42 {
-		t.Errorf("MessagesPublished = %d, want 42", got.MessagesPublished)
-	}
-}
-
 func TestSubscribeIncrementsActiveTopicsAndSubscribers(t *testing.T) {
 	s := newTestStore()
 	ch := s.Subscribe("sports")
 	defer s.Unsubscribe("sports", ch)
 
-	got := s.pubSubStats.GetStats()
-	if got.ActiveTopics != 1 {
-		t.Errorf("ActiveTopics = %d, want 1", got.ActiveTopics)
+	if got := s.pubSubStats.activeTopics.Load(); got != 1 {
+		t.Errorf("ActiveTopics = %d, want 1", got)
 	}
-	if got.ActiveSubscribers != 1 {
-		t.Errorf("ActiveSubscribers = %d, want 1", got.ActiveSubscribers)
+	if got := s.pubSubStats.activeSubscribers.Load(); got != 1 {
+		t.Errorf("ActiveSubscribers = %d, want 1", got)
 	}
 }
 
@@ -499,12 +482,11 @@ func TestSubscribeSecondSubscriberSameTopicOnlyOneActiveTopic(t *testing.T) {
 	defer s.Unsubscribe("news", ch1)
 	defer s.Unsubscribe("news", ch2)
 
-	got := s.pubSubStats.GetStats()
-	if got.ActiveTopics != 1 {
-		t.Errorf("ActiveTopics = %d, want 1 (same topic)", got.ActiveTopics)
+	if got := s.pubSubStats.activeTopics.Load(); got != 1 {
+		t.Errorf("ActiveTopics = %d, want 1 (same topic)", got)
 	}
-	if got.ActiveSubscribers != 2 {
-		t.Errorf("ActiveSubscribers = %d, want 2", got.ActiveSubscribers)
+	if got := s.pubSubStats.activeSubscribers.Load(); got != 2 {
+		t.Errorf("ActiveSubscribers = %d, want 2", got)
 	}
 }
 
@@ -515,12 +497,11 @@ func TestSubscribeTwoDistinctTopicsCountsBoth(t *testing.T) {
 	defer s.Unsubscribe("sports", ch1)
 	defer s.Unsubscribe("news", ch2)
 
-	got := s.pubSubStats.GetStats()
-	if got.ActiveTopics != 2 {
-		t.Errorf("ActiveTopics = %d, want 2", got.ActiveTopics)
+	if got := s.pubSubStats.activeTopics.Load(); got != 2 {
+		t.Errorf("ActiveTopics = %d, want 2", got)
 	}
-	if got.ActiveSubscribers != 2 {
-		t.Errorf("ActiveSubscribers = %d, want 2", got.ActiveSubscribers)
+	if got := s.pubSubStats.activeSubscribers.Load(); got != 2 {
+		t.Errorf("ActiveSubscribers = %d, want 2", got)
 	}
 }
 
@@ -529,12 +510,11 @@ func TestUnsubscribeDecrementsStats(t *testing.T) {
 	ch := s.Subscribe("sports")
 	s.Unsubscribe("sports", ch)
 
-	got := s.pubSubStats.GetStats()
-	if got.ActiveTopics != 0 {
-		t.Errorf("ActiveTopics = %d, want 0 after unsubscribe", got.ActiveTopics)
+	if got := s.pubSubStats.activeTopics.Load(); got != 0 {
+		t.Errorf("ActiveTopics = %d, want 0 after unsubscribe", got)
 	}
-	if got.ActiveSubscribers != 0 {
-		t.Errorf("ActiveSubscribers = %d, want 0 after unsubscribe", got.ActiveSubscribers)
+	if got := s.pubSubStats.activeSubscribers.Load(); got != 0 {
+		t.Errorf("ActiveSubscribers = %d, want 0 after unsubscribe", got)
 	}
 }
 
@@ -545,9 +525,9 @@ func TestPublishIncrementsMessagesPublished(t *testing.T) {
 
 	s.publish([]string{"events", "hello"})
 
-	got := s.pubSubStats.GetStats()
-	if got.MessagesPublished != 1 {
-		t.Errorf("MessagesPublished = %d, want 1", got.MessagesPublished)
+	spy := s.metrics.(*spyStoreMetrics)
+	if got := spy.MessagesPublished(); got != 1 {
+		t.Errorf("MessagesPublished = %d, want 1", got)
 	}
 }
 
@@ -555,9 +535,9 @@ func TestPublishNoSubscribersDoesNotIncrementMessagesPublished(t *testing.T) {
 	s := newTestStore()
 	s.publish([]string{"empty-topic", "hello"})
 
-	got := s.pubSubStats.GetStats()
-	if got.MessagesPublished != 0 {
-		t.Errorf("MessagesPublished = %d, want 0 (no subscribers)", got.MessagesPublished)
+	spy := s.metrics.(*spyStoreMetrics)
+	if got := spy.MessagesPublished(); got != 0 {
+		t.Errorf("MessagesPublished = %d, want 0 (no subscribers)", got)
 	}
 }
 
@@ -1136,54 +1116,52 @@ func TestMemoryStatsMaxSizeReflectsLimit(t *testing.T) {
 }
 
 func TestMemoryProfileGetStats(t *testing.T) {
-	memProf := NewMemProfile(1000)
+	spy := newSpyStoreMetrics()
+	memProf := NewMemProfile(1000, spy)
 	e := &entry{value: []byte("val")}
 	memProf.recordDataSize("key", e)
 
-	stats := memProf.GetStats()
-
-	if stats.KeyCount != 1 {
-		t.Errorf("KeyCount = %d, want 1", stats.KeyCount)
+	if memProf.keyCount != 1 {
+		t.Errorf("keyCount = %d, want 1", memProf.keyCount)
 	}
-	if stats.KeyBytes <= 0 {
-		t.Errorf("KeyBytes = %d, want > 0", stats.KeyBytes)
+	if memProf.keyBytes <= 0 {
+		t.Errorf("keyBytes = %d, want > 0", memProf.keyBytes)
 	}
-	if stats.ValueBytes <= 0 {
-		t.Errorf("ValueBytes = %d, want > 0", stats.ValueBytes)
+	if memProf.valueBytes <= 0 {
+		t.Errorf("valueBytes = %d, want > 0", memProf.valueBytes)
 	}
-	if stats.MaxBytes != 1000 {
-		t.Errorf("MaxBytes = %d, want 1000", stats.MaxBytes)
+	if memProf.maxBytes != 1000 {
+		t.Errorf("maxBytes = %d, want 1000", memProf.maxBytes)
 	}
-	if stats.CurrentBytes <= 0 {
-		t.Errorf("CurrentBytes = %d, want > 0 (includes fixed overhead)", stats.CurrentBytes)
+	if memProf.currentMemorySize() <= 0 {
+		t.Errorf("currentMemorySize() = %d, want > 0 (includes fixed overhead)", memProf.currentMemorySize())
 	}
-	if stats.Utilization <= 0 {
-		t.Errorf("Utilization = %f, want > 0", stats.Utilization)
+	if spy.memoryUtilization <= 0 {
+		t.Errorf("reported memoryUtilization = %f, want > 0", spy.memoryUtilization)
 	}
 }
 
 func TestMemoryProfileGetStatsUnlimited(t *testing.T) {
-	memProf := NewMemProfile(0)
-	stats := memProf.GetStats()
+	spy := newSpyStoreMetrics()
+	NewMemProfile(0, spy)
 
-	if stats.MaxBytes != 0 {
-		t.Errorf("MaxBytes = %d, want 0", stats.MaxBytes)
+	if spy.maxMemoryBytes != 0 {
+		t.Errorf("reported maxMemoryBytes = %d, want 0", spy.maxMemoryBytes)
 	}
-	if stats.Utilization != 0 {
-		t.Errorf("Utilization = %f, want 0 when unlimited", stats.Utilization)
+	if spy.memoryUtilization != 0 {
+		t.Errorf("reported memoryUtilization = %f, want 0 when unlimited", spy.memoryUtilization)
 	}
 }
 
 func TestMemoryProfileGetStatsPeakBytesIsRetained(t *testing.T) {
-	memProf := NewMemProfile(0)
+	memProf := NewMemProfile(0, newSpyStoreMetrics())
 	e := &entry{value: []byte("value")}
 	memProf.recordDataSize("key", e)
 	peakAfterAdd := memProf.peakBytes
 	memProf.recordDataRemove("key", e)
 
-	stats := memProf.GetStats()
-	if stats.PeakBytes != peakAfterAdd {
-		t.Errorf("PeakBytes = %d, want %d (should not drop after remove)", stats.PeakBytes, peakAfterAdd)
+	if memProf.peakBytes != peakAfterAdd {
+		t.Errorf("peakBytes = %d, want %d (should not drop after remove)", memProf.peakBytes, peakAfterAdd)
 	}
 }
 

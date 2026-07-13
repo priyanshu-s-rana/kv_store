@@ -8,6 +8,10 @@ type CFG struct {
 		Host string `mapstructure:"host"`
 		Port string `mapstructure:"port"`
 	} `mapstructure:"server"`
+	Metrics struct {
+		Host string `mapstructure:"host"`
+		Port string `mapstructure:"port"`
+	} `mapstructure:"metrics"`
 	Persistence struct {
 		Journal struct {
 			Path1  string `mapstructure:"path1"`

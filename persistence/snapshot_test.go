@@ -10,7 +10,7 @@ import (
 
 func newTestSnapshot(t *testing.T, dir string) *Snapshot {
 	t.Helper()
-	return NewSnapshot(&SnapshotConfig{FilePath: filepath.Join(dir, "snap.gob")})
+	return NewSnapshot(&SnapshotConfig{FilePath: filepath.Join(dir, "snap.gob")}, noopPersistenceMetrics{})
 }
 
 // ============================================================

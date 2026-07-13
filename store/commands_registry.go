@@ -74,10 +74,6 @@ var Registry = map[constants.CmdName]CommandsMeta{
 		Handler: (*Store).checkpoint,
 		IsWrite: false,
 	},
-	constants.CheckpointSuccess: {
-		Handler: (*Store).checkpointSuccess,
-		IsWrite: false,
-	},
 	constants.Rebaseline: {
 		Handler: (*Store).rebaseline,
 		IsWrite: false,

@@ -34,18 +34,21 @@ type Persistence struct {
 	ctx             context.Context
 	cancel          context.CancelFunc
 	wg              sync.WaitGroup
+	metrics         PersistenceMetrics
 }
 
-func New(ctx context.Context, cancel context.CancelFunc, cmdChan chan<- Command, journalConfig [2]*AOFConfig, snapshotConfig *SnapshotConfig) (*Persistence, error) {
+func New(ctx context.Context, cancel context.CancelFunc, cmdChan chan<- Command, journalConfig [2]*AOFConfig, snapshotConfig *SnapshotConfig, metrics PersistenceMetrics) (*Persistence, error) {
 	log.Printf("[Persistence] Journal Configs 1: %+v, 2: %+v", journalConfig[0], journalConfig[1])
-	snapshot := NewSnapshot(snapshotConfig)
-	journal, err := NewJournal(journalConfig)
+	snapshot := NewSnapshot(snapshotConfig, metrics)
+	journal, err := NewJournal(journalConfig, metrics)
 	if err != nil {
 		return nil, err
 	}
 	checkpointState := &CheckpointState{}
 	checkpointState.LastSucceeded.Store(true)
 
+	metrics.SetPersistenceEnabled(true)
+	metrics.SetLastCheckpointSucceeded(true)
 	return &Persistence{
 		journal:         journal,
 		snapshot:        snapshot,
@@ -53,6 +56,7 @@ func New(ctx context.Context, cancel context.CancelFunc, cmdChan chan<- Command,
 		checkpointState: checkpointState,
 		ctx:             ctx,
 		cancel:          cancel,
+		metrics:         metrics,
 	}, nil
 }
 
@@ -74,6 +78,10 @@ func (p *Persistence) Close() {
 }
 
 func (p *Persistence) LoadFromDisk() error {
+	start := time.Now()
+	defer func() {
+		p.metrics.ObserveSnapshotLoadDuration(time.Since(start))
+	}()
 	snapshotFile, err := p.snapshot.Load()
 	if err != nil {
 		return err
@@ -101,38 +109,68 @@ func (p *Persistence) LoadFromDisk() error {
 		}
 	}
 
+	p.metrics.IncRecoveredCommands(uint64(keysRecovered))
 	log.Printf("[Persistence] Keys recovered by Snapshot: %d , not able to recover: %d", keysRecovered, keysNotRecovered)
 	return nil
 }
 
 func (p *Persistence) ReplayJournal() (bool, error) {
-	return p.journal.Replay(p.snapshotFile, p.cmdChan)
+	start := time.Now()
+	p.metrics.IncJournalReplay()
+	defer func() {
+		p.metrics.ObserveJournalReplayDuration(time.Since(start))
+	}()
+
+	replayed, err := p.journal.Replay(p.snapshotFile, p.cmdChan)
+	if err != nil {
+		p.metrics.IncJournalReplayFailure()
+		return false, err
+	}
+	return replayed, nil
 }
 
-func (p *Persistence) Recovery() error {
-	if err := p.LoadFromDisk(); err != nil {
-		return err
+func (p *Persistence) Recovery() (err error) {
+	start := time.Now()
+	p.metrics.IncRecoveryRun()
+	defer func() {
+		if err != nil {
+			p.metrics.IncRecoveryFailure()
+		}
+		p.metrics.ObserveRecoveryDuration(time.Since(start))
+	}()
+
+	if err = p.LoadFromDisk(); err != nil {
+		return
 	}
 
 	replayed, err := p.ReplayJournal()
 	if err != nil {
-		return err
+		return
 	}
 
 	log.Printf("[Persistance] Recovery Complete: generation = %d, sequence_id = %d", p.journal.generation.Load(), p.journal.sequenceID.Load())
 
 	if replayed {
+		p.metrics.IncRecoveryRebaseline()
 		log.Printf("[Persistance] Creating fresh baseline snapshot...")
-		return sendCommandToEventLoop(p.cmdChan, constants.Rebaseline, nil)
+		if err := sendCommandToEventLoop(p.cmdChan, constants.Rebaseline, nil); err != nil {
+			p.metrics.IncRecoveryRebaselineFailure()
+			return err
+		}
 	}
 
-	return nil
+	return
 }
 
 // ================== Interface Functions ===================
 
 func (p *Persistence) Append(name constants.CmdName, args []string) error {
-	return p.journal.Append(name, args)
+	if err := p.journal.Append(name, args); err != nil {
+		p.metrics.IncAofCommandWriteFailure()
+		return err
+	}
+	p.metrics.IncAofCommandWritten()
+	return nil
 }
 
 func (p *Persistence) Checkpoint(snapshot map[string]SnapshotEntry) error {
@@ -140,7 +178,8 @@ func (p *Persistence) Checkpoint(snapshot map[string]SnapshotEntry) error {
 		return fmt.Errorf(constants.CHECKPOINT_IN_PROGRESS)
 	}
 
-	p.checkpointState.InProgress.Store(true)
+	p.metrics.IncCheckpointRun()
+	p.setCheckpointInProgress(true)
 	sealedGen := p.journal.generation.Load()
 	lastSequenceID := p.journal.sequenceID.Load()
 	if p.checkpointState.LastSucceeded.Load() {
@@ -158,32 +197,29 @@ func (p *Persistence) Checkpoint(snapshot map[string]SnapshotEntry) error {
 			return
 		}
 
-		if err := p.checkpointSuccess(); err != nil {
-			p.markCheckpointFailed()
-		} else {
-			p.markCheckpointSuccess()
-		}
+		p.markCheckpointSuccess()
 	})
 	return nil
 }
 
-func (p *Persistence) CheckpointSuccess() error {
-	log.Printf("[Persistance] Checkpoint complete: snapshot generation = %d", p.journal.generation.Load())
-	return nil
-}
+func (p *Persistence) Rebaseline(snapshot map[string]SnapshotEntry) (err error) {
+	start := time.Now()
+	defer func() {
+		p.metrics.ObserveRebaselineDuration(time.Since(start))
+	}()
 
-func (p *Persistence) RebaseLine(snapshot map[string]SnapshotEntry) error {
 	currentGen := p.journal.generation.Load()
-	if err := p.saveSnapshot(snapshot, currentGen, p.journal.sequenceID.Load()); err != nil {
-		return err
+	if err = p.saveSnapshot(snapshot, currentGen, p.journal.sequenceID.Load()); err != nil {
+		return
 	}
 
 	nextGen := p.journal.generation.Load() + 1
-	if err := p.journal.standby().Initialize(nextGen); err != nil {
-		return err
+	if err = p.journal.standby().Initialize(nextGen); err != nil {
+		return
 	}
 
+	p.metrics.SetStandbyJournalSizeBytes(p.journal.current().size.Load())
 	p.journal.generation.Store(nextGen)
-
+	p.metrics.SetCurrentGeneration(p.journal.generation.Load())
 	return nil
 }

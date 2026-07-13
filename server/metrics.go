@@ -3,17 +3,33 @@ package server
 import (
 	"io"
 	"sync/atomic"
+	"time"
+
+	"github.com/priyanshu-s-rana/kv_store/constants"
 )
 
-// ServerStats is a plain snapshot of server metrics returned by GetStats.
-type ServerStats struct {
-	ActiveConnections        int64
-	TotalConnectionsAccepted int64
-	BytesSent                int64
-	BytesReceived            int64
-	ParserErrors             int64
-	CommandsReceived         int64
-	FailedCommands           int64
+// ServerMetrics is the domain-level metrics contract for the Server subsystem.
+// Implementations translate these events/state changes into an observability
+// backend (e.g. Prometheus); the Server package has no knowledge of that backend.
+type ServerMetrics interface {
+	IncConnectionsAccepted()
+	IncConnectionsClosed()
+	SetActiveConnections(count int64)
+
+	IncBytesSent(bytes int64)
+	IncBytesReceived(bytes int64)
+
+	IncParserErrors()
+
+	IncCommandsReceived(cmd constants.CmdName)
+	IncFailedCommands(cmd constants.CmdName)
+
+	// Time from handing a command to the Store until its response is received.
+	// This is the full round trip as seen by the network layer, including Store
+	// execution; it is a superset of the Store's own ObserveCommandDuration.
+	ObserveCommandDuration(cmd constants.CmdName, duration time.Duration)
+
+	ObserveResponseWriteDuration(duration time.Duration)
 }
 
 type CountingReader struct {
@@ -29,16 +45,4 @@ func (cntRdr *CountingReader) Read(buff []byte) (int, error) {
 
 func (cntRdr *CountingReader) BytesRead() int64 {
 	return cntRdr.bytesRead.Load()
-}
-
-func (s *Server) GetStats() ServerStats {
-	return ServerStats{
-		ActiveConnections:        s.stats.activeConnections.Load(),
-		TotalConnectionsAccepted: s.stats.totalConnectionsAccepted.Load(),
-		BytesSent:                s.stats.bytesSent.Load(),
-		BytesReceived:            s.stats.bytesReceived.Load(),
-		ParserErrors:             s.stats.parserErrors.Load(),
-		CommandsReceived:         s.stats.commandsReceived.Load(),
-		FailedCommands:           s.stats.failedCommands.Load(),
-	}
 }

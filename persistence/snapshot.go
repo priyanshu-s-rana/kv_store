@@ -17,6 +17,7 @@ type SnapshotConfig struct {
 type Snapshot struct {
 	snapshotConfig *SnapshotConfig
 	tempFilePath   string
+	metrics        PersistenceMetrics
 }
 
 type snapshotFile struct {
@@ -25,7 +26,7 @@ type snapshotFile struct {
 	Data           map[string]SnapshotEntry
 }
 
-func NewSnapshot(config *SnapshotConfig) *Snapshot {
+func NewSnapshot(config *SnapshotConfig, metrics PersistenceMetrics) *Snapshot {
 	tempFilePath := config.FilePath
 	if !strings.HasSuffix(tempFilePath, ".tmp") {
 		tempFilePath += ".tmp"
@@ -33,6 +34,7 @@ func NewSnapshot(config *SnapshotConfig) *Snapshot {
 	return &Snapshot{
 		snapshotConfig: config,
 		tempFilePath:   tempFilePath,
+		metrics:        metrics,
 	}
 }
 
@@ -62,6 +64,12 @@ func (snapshot *Snapshot) SaveToDisk(data map[string]SnapshotEntry, gen uint64, 
 		return
 	}
 
+	info, err := os.Stat(snapshot.tempFilePath)
+	if err != nil {
+		return
+	}
+
+	snapshot.metrics.SetSnapshotBytesWritten(uint64(info.Size()))
 	err = os.Rename(snapshot.tempFilePath, snapshot.snapshotConfig.FilePath)
 	return
 }
