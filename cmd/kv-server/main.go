@@ -4,18 +4,32 @@ import (
 	"context"
 	"flag"
 	"log"
+	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
 
 	"github.com/priyanshu-s-rana/kv_store/config"
 	"github.com/priyanshu-s-rana/kv_store/constants"
+	"github.com/priyanshu-s-rana/kv_store/metrics"
 	"github.com/priyanshu-s-rana/kv_store/models"
 	"github.com/priyanshu-s-rana/kv_store/persistence"
 	"github.com/priyanshu-s-rana/kv_store/server"
 	"github.com/priyanshu-s-rana/kv_store/store"
 	"github.com/priyanshu-s-rana/kv_store/utils"
 )
+
+// startMetricsServer serves the Prometheus exposition endpoint on addr.
+// Runs until the process exits; listener errors are logged, not fatal.
+func startMetricsServer(addr string, m *metrics.Manager) {
+	mux := http.NewServeMux()
+	mux.Handle("/metrics", m.Handler())
+
+	log.Printf("[main] metrics server listening on %s", addr)
+	if err := http.ListenAndServe(addr, mux); err != nil {
+		log.Printf("[main] metrics server error: %v", err)
+	}
+}
 
 // gracefulShutdown blocks until SIGINT or SIGTERM is received, then cancels the
 // context, flushes a final snapshot to disk, and exits cleanly.
@@ -47,10 +61,16 @@ func main() {
 
 	memorySize := CONFIG.Memory.MaxSize
 
+	metricsHost := utils.ResolveStringFallbacks(CONFIG.Metrics.Host, "localhost")
+	metricsPort := utils.ResolveStringFallbacks(CONFIG.Metrics.Port, "9090")
+	metricsAddr := metricsHost + ":" + metricsPort
+
+	metrics := metrics.New()
+	go startMetricsServer(metricsAddr, metrics)
+
 	cmdChan := make(chan models.Command)
 
 	ctx, cancel := context.WithCancel(context.Background())
-	log.Printf("[main] CONFIG: %+v", CONFIG)
 	persist, err := persistence.New(
 		ctx,
 		cancel,
@@ -69,12 +89,13 @@ func main() {
 			FilePath: CONFIG.Persistence.Snapshot.Path,
 			Interval: CONFIG.Persistence.Snapshot.Interval,
 		},
+		metrics.Persistence,
 	)
 	if err != nil {
 		log.Fatalf("[main] error initializing persistence: %v.", err)
 	}
 
-	store := store.New(memorySize, cmdChan, persist)
+	store := store.New(memorySize, cmdChan, persist, metrics.Store)
 	store.Start()
 
 	if err := persist.Recovery(); err != nil {
@@ -87,7 +108,7 @@ func main() {
 
 	go gracefulShutdown(persist)
 
-	server := server.New(addr, cmdChan, store)
+	server := server.New(addr, cmdChan, store, metrics.Server)
 	log.Printf("[main] KV Store starting server on port %s", port)
 	if err = server.Start(); err != nil {
 		log.Fatalf("[main] server error: %v", err)

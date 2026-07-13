@@ -42,12 +42,12 @@ func newTestNode(t *testing.T, paths [2]string, snapPath string, policy string) 
 		{FilePath: paths[0], SyncPolicy: policy},
 		{FilePath: paths[1], SyncPolicy: policy},
 	}
-	persist, err := New(ctx, cancel, cmdChan, journalConfigs, &SnapshotConfig{FilePath: snapPath})
+	persist, err := New(ctx, cancel, cmdChan, journalConfigs, &SnapshotConfig{FilePath: snapPath}, noopPersistenceMetrics{})
 	if err != nil {
 		t.Fatalf("persistence.New: %v", err)
 	}
 
-	st := store.New(0, cmdChan, persist)
+	st := store.New(0, cmdChan, persist, noopStoreMetrics{})
 	st.Start()
 
 	return &testNode{t: t, ctx: ctx, cancel: cancel, cmdChan: cmdChan, persist: persist, store: st}

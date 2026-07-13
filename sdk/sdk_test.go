@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/priyanshu-s-rana/kv_store/constants"
+	"github.com/priyanshu-s-rana/kv_store/metrics"
 	"github.com/priyanshu-s-rana/kv_store/server"
 	"github.com/priyanshu-s-rana/kv_store/store"
 )
@@ -22,15 +23,16 @@ type fakePersistence struct{}
 func (fakePersistence) Append(constants.CmdName, []string) error        { return nil }
 func (fakePersistence) Checkpoint(map[string]store.SnapshotEntry) error { return nil }
 func (fakePersistence) CheckpointSuccess() error                        { return nil }
-func (fakePersistence) RebaseLine(map[string]store.SnapshotEntry) error { return nil }
+func (fakePersistence) Rebaseline(map[string]store.SnapshotEntry) error { return nil }
 
 // TestMain starts a real kv-server on testAddr before any test runs and stops
 // it when all tests finish.
 func TestMain(m *testing.M) {
+	metricsManager := metrics.New()
 	cmdChan := make(chan store.Command)
-	st := store.New(0, cmdChan, fakePersistence{})
+	st := store.New(0, cmdChan, fakePersistence{}, metricsManager.Store)
 	st.Start()
-	srv := server.New(testAddr, cmdChan, st)
+	srv := server.New(testAddr, cmdChan, st, metricsManager.Server)
 	go srv.Start()
 
 	// Wait until the server is ready.

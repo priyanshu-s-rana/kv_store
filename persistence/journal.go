@@ -15,19 +15,21 @@ type Journal struct {
 	aofs       [2]*AOF
 	generation atomic.Uint64
 	sequenceID atomic.Uint64
+	metrics    PersistenceMetrics
 }
 
-func NewJournal(configs [2]*AOFConfig) (*Journal, error) {
+func NewJournal(configs [2]*AOFConfig, metrics PersistenceMetrics) (*Journal, error) {
 	var aofs [2]*AOF
 	for i, value := range configs {
-		if aof, err := NewAOF(value); err != nil {
+		if aof, err := NewAOF(value, metrics); err != nil {
 			return nil, err
 		} else {
 			aofs[i] = aof
 		}
 	}
 	return &Journal{
-		aofs: aofs,
+		aofs:    aofs,
+		metrics: metrics,
 	}, nil
 }
 
@@ -46,6 +48,7 @@ func (j *Journal) Append(name constants.CmdName, args []string) error {
 	}
 
 	j.sequenceID.Store(nextSequenceID)
+	j.metrics.SetCurrentSequenceID(j.sequenceID.Load())
 	return nil
 }
 
@@ -57,17 +60,26 @@ func (j *Journal) Start(ctx context.Context, wg *sync.WaitGroup) error {
 	return currentAof.ensureInitialize(j.generation.Load())
 }
 
-func (j *Journal) Rotate() error {
-	if err := j.current().fsync(); err != nil {
-		return err
+func (j *Journal) Rotate() (err error) {
+	j.metrics.IncJournalRotation()
+	defer func() {
+		if err != nil {
+			j.metrics.IncJournalRotationFailure()
+		}
+	}()
+
+	if err = j.current().fsync(); err != nil {
+		return
 	}
 
 	nextGen := j.generation.Load() + 1
-	if err := j.standby().Initialize(nextGen); err != nil {
-		return err
+	if err = j.standby().Initialize(nextGen); err != nil {
+		return
 	}
 
+	j.metrics.SetStandbyJournalSizeBytes(j.current().size.Load())
 	j.generation.Store(nextGen)
+	j.metrics.SetCurrentGeneration(j.generation.Load())
 	return nil
 }
 
@@ -89,6 +101,7 @@ func (j *Journal) Replay(snapshotFile *snapshotFile, cmd chan<- Command) (bool, 
 	}
 
 	j.generation.Store(max(aofsMetadata[0].Generation, aofsMetadata[1].Generation))
+	j.metrics.SetCurrentGeneration(j.generation.Load())
 	latestSequenceID := snapshotFile.LastSequenceID
 	replayed := false
 	for _, aofMeta := range aofsMetadata {
@@ -106,6 +119,7 @@ func (j *Journal) Replay(snapshotFile *snapshotFile, cmd chan<- Command) (bool, 
 	}
 
 	j.sequenceID.Store(latestSequenceID)
+	j.metrics.SetCurrentSequenceID(j.sequenceID.Load())
 	return replayed, nil
 }
 

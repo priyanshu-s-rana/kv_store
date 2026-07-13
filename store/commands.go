@@ -144,9 +144,10 @@ func (s *Store) Subscribe(topic string) chan []byte {
 
 	if isNewTopic {
 		s.memoryProfile.recordPubSubTopicSize(topic)
+		s.pubSubStats.incActiveTopics()
 	}
 	s.memoryProfile.recordPubSubSubscriber()
-
+	s.pubSubStats.incActiveSubscribers()
 	return ch
 }
 
@@ -167,13 +168,19 @@ func (s *Store) Unsubscribe(topic string, ch chan []byte) {
 
 	if isTopicEmpty {
 		s.memoryProfile.recordPubSubTopicRemove(topic)
+		s.pubSubStats.decActiveTopics()
 	}
 	s.memoryProfile.recordPubSubSubscriberRemove()
+	s.pubSubStats.decActiveSubscribers()
+
 }
 
 // PUBLISH command sends a message to all subscribers of the given topic.
 // @returns the number of subscribers that received the message.
 func (s *Store) publish(args []string) Response {
+	start := time.Now()
+	defer func() { s.metrics.ObservePublishDuration(time.Since(start)) }()
+
 	if len(args) < 2 {
 		return Response{Value: parser.Error(fmt.Sprintf(constants.WRONG_NUM_ARGS, constants.Publish))}
 	}
@@ -190,6 +197,7 @@ func (s *Store) publish(args []string) Response {
 		select {
 		case subChan <- []byte(message):
 			delivered++
+			s.metrics.IncMessagesPublished()
 		default:
 		}
 	}
@@ -199,6 +207,9 @@ func (s *Store) publish(args []string) Response {
 
 // evict removes all expired keys whose TTL entries have reached the front of the heap.
 func (s *Store) evict(_ []string) Response {
+	start := time.Now()
+	defer func() { s.metrics.ObserveTTLExpiryDuration(time.Since(start)) }()
+
 	now := time.Now()
 	for s.ttls.Len() > 0 {
 		item, ok := s.ttls.Peek()
@@ -210,6 +221,7 @@ func (s *Store) evict(_ []string) Response {
 		}
 		if e, ok := s.data[item.key]; ok && e.isExpired() {
 			deleteKey(s, item.key)
+			s.metrics.IncExpiredKeys()
 			s.publish([]string{"lock-released:" + item.key, "released"})
 		}
 	}
@@ -316,20 +328,13 @@ func (s *Store) checkpoint(_ []string) Response {
 	return Response{Value: parser.SimpleString(constants.OK)}
 }
 
-func (s *Store) checkpointSuccess(_ []string) Response {
-	if err := s.persistence.CheckpointSuccess(); err != nil {
-		return Response{Value: parser.Error(constants.CHECKPOINT_FAILED)}
-	}
-	return Response{Value: parser.SimpleString(constants.OK)}
-}
-
 func (s *Store) rebaseline(_ []string) Response {
 	snapshot, err := s.capture()
 	if err != nil {
 		return Response{Value: parser.Error(fmt.Sprintf(constants.CAPTURE_ERROR, err))}
 	}
 
-	if err := s.persistence.RebaseLine(snapshot); err != nil {
+	if err := s.persistence.Rebaseline(snapshot); err != nil {
 		return Response{Value: parser.Error(constants.REBASELINE_ERROR)}
 	}
 

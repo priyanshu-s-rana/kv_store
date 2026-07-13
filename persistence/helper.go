@@ -1,16 +1,13 @@
 package persistence
 
 import (
-	"bufio"
 	"fmt"
 	"log"
 	"os"
 	"path/filepath"
-	"strconv"
 	"time"
 
 	"github.com/priyanshu-s-rana/kv_store/constants"
-	"github.com/priyanshu-s-rana/kv_store/parser"
 )
 
 func OpenFile(filePath string, flag int) (*os.File, error) {
@@ -18,15 +15,6 @@ func OpenFile(filePath string, flag int) (*os.File, error) {
 		return nil, err
 	}
 	return os.OpenFile(filePath, flag, constants.FilePerm)
-}
-
-func writeHeader(writer *bufio.Writer, gen uint64) error {
-	header := parser.Array(constants.Header, constants.Generation, strconv.FormatUint(gen, 10))
-	_, err := writer.Write(header)
-	if err != nil {
-		return err
-	}
-	return nil
 }
 
 func sendCommandToEventLoop(cmdChan chan<- Command, name constants.CmdName, args []string) error {
@@ -46,17 +34,18 @@ func sendCommandToEventLoop(cmdChan chan<- Command, name constants.CmdName, args
 	return nil
 }
 
-func (p *Persistence) saveSnapshot(data map[string]SnapshotEntry, sealedGen uint64, lastSequenceID uint64) error {
+func (p *Persistence) saveSnapshot(data map[string]SnapshotEntry, sealedGen uint64, lastSequenceID uint64) (err error) {
+	start := time.Now()
+	defer func() {
+		p.metrics.ObserveSnapshotSaveDuration(time.Since(start))
+	}()
+
 	if err := p.snapshot.SaveToDisk(data, sealedGen, lastSequenceID); err != nil {
 		log.Printf(constants.SNAPSHOT_FAILED, err)
 		return err
 	}
 	log.Printf(constants.SNAPSHOT_SAVED, p.snapshot.snapshotConfig.FilePath)
 	return nil
-}
-
-func (p *Persistence) checkpointSuccess() error {
-	return sendCommandToEventLoop(p.cmdChan, constants.CheckpointSuccess, nil)
 }
 
 func (p *Persistence) triggerFinalCheckpoint() {
@@ -87,11 +76,23 @@ func (p *Persistence) startSnapshotting() {
 }
 
 func (p *Persistence) markCheckpointFailed() {
-	p.checkpointState.LastSucceeded.Store(false)
-	p.checkpointState.InProgress.Store(false)
+	p.setCheckpointLastSucceeded(false)
+	p.setCheckpointInProgress(false)
+	p.metrics.IncCheckpointFailure()
 }
 
 func (p *Persistence) markCheckpointSuccess() {
-	p.checkpointState.LastSucceeded.Store(true)
-	p.checkpointState.InProgress.Store(false)
+	p.setCheckpointLastSucceeded(true)
+	p.setCheckpointInProgress(false)
+	p.metrics.IncCheckpointSuccess()
+}
+
+func (p *Persistence) setCheckpointInProgress(val bool) {
+	p.checkpointState.InProgress.Store(val)
+	p.metrics.SetCheckpointInProgress(val)
+}
+
+func (p *Persistence) setCheckpointLastSucceeded(val bool) {
+	p.checkpointState.LastSucceeded.Store(val)
+	p.metrics.SetLastCheckpointSucceeded(val)
 }

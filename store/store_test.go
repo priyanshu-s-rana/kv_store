@@ -16,14 +16,157 @@ type fakePersistence struct{}
 func (fakePersistence) Append(constants.CmdName, []string) error  { return nil }
 func (fakePersistence) Checkpoint(map[string]SnapshotEntry) error { return nil }
 func (fakePersistence) CheckpointSuccess() error                  { return nil }
-func (fakePersistence) RebaseLine(map[string]SnapshotEntry) error { return nil }
+func (fakePersistence) Rebaseline(map[string]SnapshotEntry) error { return nil }
+
+var _ StoreMetrics = (*spyStoreMetrics)(nil)
+
+// spyStoreMetrics is a StoreMetrics test double that records every call, so
+// tests can assert on the metrics reported alongside (or instead of) store
+// state that no longer has a public accessor (e.g. messagesPublished).
+type spyStoreMetrics struct {
+	mu sync.Mutex
+
+	commandsExecuted map[constants.CmdName]int
+	commandFailures  map[constants.CmdName]int
+
+	currentMemoryBytes int64
+	peakMemoryBytes    int64
+	maxMemoryBytes     int64
+	memoryUtilization  float32
+	keyCount           int64
+	keyBytes           int64
+	valueBytes         int64
+	ttlBytes           int64
+	lruBytes           int64
+	pubsubBytes        int64
+
+	expiredKeys       int
+	activeTopics      int64
+	activeSubscribers int64
+	messagesPublished int
+}
+
+func newSpyStoreMetrics() *spyStoreMetrics {
+	return &spyStoreMetrics{
+		commandsExecuted: make(map[constants.CmdName]int),
+		commandFailures:  make(map[constants.CmdName]int),
+	}
+}
+
+func (m *spyStoreMetrics) IncCommandsExecuted(cmd constants.CmdName) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.commandsExecuted[cmd]++
+}
+
+func (m *spyStoreMetrics) IncCommandFailures(cmd constants.CmdName) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.commandFailures[cmd]++
+}
+
+func (m *spyStoreMetrics) ObserveCommandDuration(constants.CmdName, time.Duration) {}
+
+func (m *spyStoreMetrics) SetCurrentMemoryBytes(b int64) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.currentMemoryBytes = b
+}
+
+func (m *spyStoreMetrics) SetPeakMemoryBytes(b int64) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.peakMemoryBytes = b
+}
+
+func (m *spyStoreMetrics) SetMaxMemoryBytes(b int64) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.maxMemoryBytes = b
+}
+
+func (m *spyStoreMetrics) SetMemoryUtilization(p float32) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.memoryUtilization = p
+}
+
+func (m *spyStoreMetrics) SetKeyCount(c int64) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.keyCount = c
+}
+
+func (m *spyStoreMetrics) SetKeyBytes(b int64) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.keyBytes = b
+}
+
+func (m *spyStoreMetrics) SetValueBytes(b int64) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.valueBytes = b
+}
+
+func (m *spyStoreMetrics) SetTTLBytes(b int64) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.ttlBytes = b
+}
+
+func (m *spyStoreMetrics) SetLRUBytes(b int64) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.lruBytes = b
+}
+
+func (m *spyStoreMetrics) SetPubSubBytes(b int64) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.pubsubBytes = b
+}
+
+func (m *spyStoreMetrics) IncExpiredKeys() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.expiredKeys++
+}
+
+func (m *spyStoreMetrics) ObserveTTLExpiryDuration(time.Duration) {}
+
+func (m *spyStoreMetrics) SetActiveTopics(c int64) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.activeTopics = c
+}
+
+func (m *spyStoreMetrics) SetActiveSubscribers(c int64) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.activeSubscribers = c
+}
+
+func (m *spyStoreMetrics) IncMessagesPublished() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.messagesPublished++
+}
+
+func (m *spyStoreMetrics) ObservePublishDuration(time.Duration) {}
+
+func (m *spyStoreMetrics) MessagesPublished() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.messagesPublished
+}
 
 // newStore builds a Store with its event loop and TTL eviction goroutines
 // running against a fresh command channel, wired to a no-op Persistence.
 func newStore(t *testing.T, memorySize int64) (*Store, chan Command) {
 	t.Helper()
 	cmdChan := make(chan Command)
-	s := New(memorySize, cmdChan, fakePersistence{})
+	s := New(memorySize, cmdChan, fakePersistence{}, newSpyStoreMetrics())
 	s.Start()
 	return s, cmdChan
 }
@@ -117,6 +260,9 @@ func TestNewInitializesFields(t *testing.T) {
 	}
 	if s.memoryProfile == nil {
 		t.Errorf("memoryProfile not initialized")
+	}
+	if s.pubSubStats == nil {
+		t.Errorf("pubSubStats not initialized")
 	}
 }
 

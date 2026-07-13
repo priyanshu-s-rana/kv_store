@@ -25,7 +25,7 @@ func newTestJournal(t *testing.T, policy string) (*Journal, [2]string) {
 		{FilePath: paths[0], SyncPolicy: policy},
 		{FilePath: paths[1], SyncPolicy: policy},
 	}
-	j, err := NewJournal(configs)
+	j, err := NewJournal(configs, noopPersistenceMetrics{})
 	if err != nil {
 		t.Fatalf("NewJournal: %v", err)
 	}
@@ -55,7 +55,7 @@ func reopenJournal(t *testing.T, paths [2]string, policy string) *Journal {
 		{FilePath: paths[0], SyncPolicy: policy},
 		{FilePath: paths[1], SyncPolicy: policy},
 	}
-	j, err := NewJournal(configs)
+	j, err := NewJournal(configs, noopPersistenceMetrics{})
 	if err != nil {
 		t.Fatalf("NewJournal (reopen): %v", err)
 	}

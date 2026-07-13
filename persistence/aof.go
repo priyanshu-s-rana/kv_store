@@ -8,6 +8,8 @@ import (
 	"os"
 	"strconv"
 	"sync"
+	"sync/atomic"
+	"time"
 
 	"github.com/priyanshu-s-rana/kv_store/constants"
 	"github.com/priyanshu-s-rana/kv_store/parser"
@@ -23,6 +25,8 @@ type AOF struct {
 	file      *os.File
 	aofConfig *AOFConfig
 	mu        sync.Mutex
+	size      atomic.Uint64
+	metrics   PersistenceMetrics
 }
 
 type AOFMetadata struct {
@@ -30,7 +34,7 @@ type AOFMetadata struct {
 	Generation uint64
 }
 
-func NewAOF(config *AOFConfig) (*AOF, error) {
+func NewAOF(config *AOFConfig, metrics PersistenceMetrics) (*AOF, error) {
 	filePath := config.FilePath
 	log.Printf("[AOF] filePath: %s", filePath)
 	file, err := OpenFile(filePath, constants.OpenAOF)
@@ -42,6 +46,7 @@ func NewAOF(config *AOFConfig) (*AOF, error) {
 		writer:    writer,
 		file:      file,
 		aofConfig: config,
+		metrics:   metrics,
 	}
 
 	return aof, nil
@@ -52,9 +57,10 @@ func (aof *AOF) Append(name constants.CmdName, args []string, sequenceID uint64)
 	command := parser.Array(parts...)
 
 	aof.mu.Lock()
-	_, err := aof.writer.Write(command)
+	n, err := aof.writer.Write(command)
 	aof.mu.Unlock()
 
+	aof.bytesWritten(n)
 	if err == nil && aof.aofConfig.SyncPolicy == constants.SyncAlways {
 		return aof.fsync()
 	}
@@ -108,6 +114,7 @@ func (aof *AOF) Replay(cmdChan chan<- Command, snapshotSequenceID uint64) (bool,
 				return replayCounter > 0, latestSquenceID, err
 			}
 			if snapshotSequenceID >= cmdSequenceID {
+				aof.metrics.IncJournalReplaySkippedCommands()
 				continue
 			}
 
@@ -126,24 +133,48 @@ func (aof *AOF) Replay(cmdChan chan<- Command, snapshotSequenceID uint64) (bool,
 
 	}
 
+	aof.metrics.IncRecoveredCommands(uint64(replayCounter))
 	log.Printf("[Persistence] Successfully replayed %d commands.", replayCounter)
 	return replayCounter > 0, latestSquenceID, nil
 }
 
-func (aof *AOF) fsync() error {
+func (aof *AOF) fsync() (err error) {
+	start := time.Now()
+	aof.metrics.IncAofFsync()
+	defer func() {
+		if err != nil {
+			aof.metrics.IncAofFsyncFailures()
+		}
+		aof.metrics.ObserveAOFFsyncDuration(time.Since(start))
+	}()
+
 	aof.mu.Lock()
 	defer aof.mu.Unlock()
-	if err := aof.writer.Flush(); err != nil {
-		return err
+	if err = aof.writer.Flush(); err != nil {
+		return
 	}
-	return aof.file.Sync()
+
+	err = aof.file.Sync()
+
+	return
 }
 
-func (aof *AOF) fsyncLocked() error {
-	if err := aof.writer.Flush(); err != nil {
-		return err
+func (aof *AOF) fsyncLocked() (err error) {
+	start := time.Now()
+	aof.metrics.IncAofFsync()
+	defer func() {
+		if err != nil {
+			aof.metrics.IncAofFsyncFailures()
+		}
+		aof.metrics.ObserveAOFFsyncDuration(time.Since(start))
+	}()
+
+	if err = aof.writer.Flush(); err != nil {
+		return
 	}
-	return aof.file.Sync()
+	err = aof.file.Sync()
+
+	return
 }
 
 func (aof *AOF) ensureInitialize(gen uint64) error {
@@ -158,9 +189,13 @@ func (aof *AOF) ensureInitialize(gen uint64) error {
 }
 
 func (aof *AOF) writeHeader(gen uint64) error {
-	if err := writeHeader(aof.writer, gen); err != nil {
+	header := parser.Array(constants.Header, constants.Generation, strconv.FormatUint(gen, 10))
+	n, err := aof.writer.Write(header)
+	if err != nil {
 		return err
 	}
+
+	aof.bytesWritten(n)
 	return aof.fsyncLocked()
 }
 
@@ -192,4 +227,12 @@ func (aof *AOF) readHeader() (*AOFMetadata, error) {
 	}
 
 	return aofMeta, nil
+}
+
+func (aof *AOF) bytesWritten(bytes int) {
+	// Track bytes physically written to the journal.
+	// This reflects on-disk file size, not necessarily successfully
+	// appended commands (e.g. partial writes).
+	aof.size.Add(uint64(bytes))
+	aof.metrics.SetCurrentJournalSizeBytes(aof.size.Load())
 }

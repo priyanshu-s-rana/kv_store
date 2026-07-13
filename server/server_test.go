@@ -7,6 +7,7 @@ import (
 	"net"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -21,13 +22,153 @@ type fakePersistence struct{}
 func (fakePersistence) Append(constants.CmdName, []string) error        { return nil }
 func (fakePersistence) Checkpoint(map[string]store.SnapshotEntry) error { return nil }
 func (fakePersistence) CheckpointSuccess() error                        { return nil }
-func (fakePersistence) RebaseLine(map[string]store.SnapshotEntry) error { return nil }
+func (fakePersistence) Rebaseline(map[string]store.SnapshotEntry) error { return nil }
+
+// noopStoreMetrics is a no-op store.StoreMetrics used to build a real Store
+// in server tests that don't inspect store-level metrics.
+type noopStoreMetrics struct{}
+
+func (noopStoreMetrics) IncCommandsExecuted(constants.CmdName)                   {}
+func (noopStoreMetrics) IncCommandFailures(constants.CmdName)                    {}
+func (noopStoreMetrics) ObserveCommandDuration(constants.CmdName, time.Duration) {}
+func (noopStoreMetrics) SetCurrentMemoryBytes(int64)                             {}
+func (noopStoreMetrics) SetPeakMemoryBytes(int64)                                {}
+func (noopStoreMetrics) SetMaxMemoryBytes(int64)                                 {}
+func (noopStoreMetrics) SetMemoryUtilization(float32)                            {}
+func (noopStoreMetrics) SetKeyCount(int64)                                       {}
+func (noopStoreMetrics) SetKeyBytes(int64)                                       {}
+func (noopStoreMetrics) SetValueBytes(int64)                                     {}
+func (noopStoreMetrics) SetTTLBytes(int64)                                       {}
+func (noopStoreMetrics) SetLRUBytes(int64)                                       {}
+func (noopStoreMetrics) SetPubSubBytes(int64)                                    {}
+func (noopStoreMetrics) IncExpiredKeys()                                         {}
+func (noopStoreMetrics) ObserveTTLExpiryDuration(time.Duration)                  {}
+func (noopStoreMetrics) SetActiveTopics(int64)                                   {}
+func (noopStoreMetrics) SetActiveSubscribers(int64)                              {}
+func (noopStoreMetrics) IncMessagesPublished()                                   {}
+func (noopStoreMetrics) ObservePublishDuration(time.Duration)                    {}
+
+var _ store.StoreMetrics = noopStoreMetrics{}
+
+// spyServerMetrics is a ServerMetrics test double that records every call, so
+// tests can assert on server-level metrics that no longer have a public
+// GetStats-style accessor.
+type spyServerMetrics struct {
+	mu sync.Mutex
+
+	connectionsAccepted int
+	connectionsClosed   int
+	activeConnections   int64
+	bytesSent           int64
+	bytesReceived       int64
+	parserErrors        int
+	commandsReceived    map[constants.CmdName]int
+	failedCommands      map[constants.CmdName]int
+}
+
+func newSpyServerMetrics() *spyServerMetrics {
+	return &spyServerMetrics{
+		commandsReceived: make(map[constants.CmdName]int),
+		failedCommands:   make(map[constants.CmdName]int),
+	}
+}
+
+func (m *spyServerMetrics) IncConnectionsAccepted() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.connectionsAccepted++
+}
+
+func (m *spyServerMetrics) IncConnectionsClosed() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.connectionsClosed++
+}
+
+func (m *spyServerMetrics) SetActiveConnections(count int64) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.activeConnections = count
+}
+
+func (m *spyServerMetrics) IncBytesSent(n int64) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.bytesSent += n
+}
+
+func (m *spyServerMetrics) IncBytesReceived(n int64) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.bytesReceived += n
+}
+
+func (m *spyServerMetrics) IncParserErrors() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.parserErrors++
+}
+
+func (m *spyServerMetrics) IncCommandsReceived(cmd constants.CmdName) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.commandsReceived[cmd]++
+}
+
+func (m *spyServerMetrics) IncFailedCommands(cmd constants.CmdName) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.failedCommands[cmd]++
+}
+
+func (m *spyServerMetrics) ObserveCommandDuration(constants.CmdName, time.Duration) {}
+func (m *spyServerMetrics) ObserveResponseWriteDuration(time.Duration)              {}
+
+func (m *spyServerMetrics) TotalConnectionsAccepted() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.connectionsAccepted
+}
+
+func (m *spyServerMetrics) TotalCommandsReceived() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	total := 0
+	for _, n := range m.commandsReceived {
+		total += n
+	}
+	return total
+}
+
+func (m *spyServerMetrics) TotalFailedCommands() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	total := 0
+	for _, n := range m.failedCommands {
+		total += n
+	}
+	return total
+}
+
+func (m *spyServerMetrics) BytesReceived() int64 {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.bytesReceived
+}
+
+func (m *spyServerMetrics) BytesSent() int64 {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.bytesSent
+}
+
+var _ ServerMetrics = (*spyServerMetrics)(nil)
 
 // newTestStore builds a Store with its event loop running against a fresh
 // command channel wired to a no-op Persistence.
 func newTestStore() (*store.Store, chan store.Command) {
 	cmdChan := make(chan store.Command)
-	st := store.New(0, cmdChan, fakePersistence{})
+	st := store.New(0, cmdChan, fakePersistence{}, noopStoreMetrics{})
 	st.Start()
 	return st, cmdChan
 }
@@ -38,7 +179,7 @@ func newTestStore() (*store.Store, chan store.Command) {
 func testConn(t *testing.T) (net.Conn, *bufio.Reader) {
 	t.Helper()
 	st, cmdChan := newTestStore()
-	s := New("", cmdChan, st)
+	s := New("", cmdChan, st, newSpyServerMetrics())
 	client, srv := net.Pipe()
 	t.Cleanup(func() { client.Close() })
 	go s.handleConnection(srv)
@@ -218,7 +359,7 @@ func TestClientDisconnect(t *testing.T) {
 
 func TestSubscribeAndPublish(t *testing.T) {
 	st, cmdChan := newTestStore()
-	s := New("", cmdChan, st)
+	s := New("", cmdChan, st, newSpyServerMetrics())
 
 	subConn, subSrv := net.Pipe()
 	t.Cleanup(func() { subConn.Close() })
@@ -565,5 +706,104 @@ func TestMEMORYSTATS(t *testing.T) {
 	got := readFullBulkResp(t, r, conn)
 	if !strings.Contains(got, "currentSize") {
 		t.Errorf("MEMORYSTATS missing currentSize: %q", got)
+	}
+}
+
+// ---- metrics ----
+
+// testServer creates an in-memory server and returns the connection, reader, and the metrics spy it reports to.
+func testServer(t *testing.T) (net.Conn, *bufio.Reader, *spyServerMetrics) {
+	t.Helper()
+	cmdChan := make(chan store.Command)
+	st := store.New(0, cmdChan, fakePersistence{}, noopStoreMetrics{})
+	st.Start()
+	metrics := newSpyServerMetrics()
+	s := New("", cmdChan, st, metrics)
+	client, srv := net.Pipe()
+	t.Cleanup(func() { client.Close() })
+	go s.handleConnection(srv)
+	return client, bufio.NewReader(client), metrics
+}
+
+func TestMetricsTotalConnectionsAccepted(t *testing.T) {
+	cmdChan := make(chan store.Command)
+	st := store.New(0, cmdChan, fakePersistence{}, noopStoreMetrics{})
+	st.Start()
+	metrics := newSpyServerMetrics()
+	s := New("", cmdChan, st, metrics)
+
+	c1, srv1 := net.Pipe()
+	c2, srv2 := net.Pipe()
+	t.Cleanup(func() { c1.Close(); c2.Close() })
+	go s.handleConnection(srv1)
+	go s.handleConnection(srv2)
+
+	r1 := bufio.NewReader(c1)
+	r2 := bufio.NewReader(c2)
+	writeLine(t, c1, "PING")
+	readResp(t, r1, c1)
+	writeLine(t, c2, "PING")
+	readResp(t, r2, c2)
+
+	if got := metrics.TotalConnectionsAccepted(); got < 2 {
+		t.Errorf("TotalConnectionsAccepted = %d, want >= 2", got)
+	}
+}
+
+func TestMetricsCommandsReceived(t *testing.T) {
+	conn, r, metrics := testServer(t)
+
+	writeLine(t, conn, "PING")
+	readResp(t, r, conn)
+	writeLine(t, conn, "PING")
+	readResp(t, r, conn)
+	writeLine(t, conn, "PING")
+	readResp(t, r, conn)
+
+	if got := metrics.TotalCommandsReceived(); got < 3 {
+		t.Errorf("CommandsReceived = %d, want >= 3", got)
+	}
+}
+
+func TestMetricsBytesReceived(t *testing.T) {
+	conn, r, metrics := testServer(t)
+
+	writeLine(t, conn, "PING")
+	readResp(t, r, conn)
+
+	if got := metrics.BytesReceived(); got <= 0 {
+		t.Errorf("BytesReceived = %d, want > 0", got)
+	}
+}
+
+func TestMetricsBytesSent(t *testing.T) {
+	conn, r, metrics := testServer(t)
+
+	writeLine(t, conn, "PING")
+	readResp(t, r, conn)
+	// Send a second command so the server goroutine has definitely finished
+	// writing (and accounting for) the first response before we read stats.
+	// bytesSent is updated after conn.Write returns, which races with readResp
+	// on net.Pipe; the extra round-trip makes that race impossible.
+	writeLine(t, conn, "PING")
+	readResp(t, r, conn)
+
+	if got := metrics.BytesSent(); got <= 0 {
+		t.Errorf("BytesSent = %d, want > 0", got)
+	}
+}
+
+func TestMetricsFailedCommands(t *testing.T) {
+	conn, r, metrics := testServer(t)
+
+	// SET with missing value returns a RESP error, which increments FailedCommands.
+	writeLine(t, conn, "SET onlykey")
+	got := readResp(t, r, conn)
+	if len(got) == 0 || got[0] != '-' {
+		t.Fatalf("expected error response, got %q", got)
+	}
+
+	if got := metrics.TotalFailedCommands(); got < 1 {
+		t.Errorf("FailedCommands = %d, want >= 1", got)
 	}
 }
