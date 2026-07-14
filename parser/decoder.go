@@ -64,7 +64,7 @@ func DecodeArray(reader *bufio.Reader, data []byte) string {
 
 	parts := make([]string, n)
 	for i := range n {
-		parts[i], err = p.readBulkString()
+		parts[i], _, err = p.readBulkString()
 		if err != nil {
 			return "(error) " + err.Error()
 		}
@@ -112,30 +112,30 @@ func DecodeInteger(reader *bufio.Reader, data []byte) string {
 
 // DecodeBulkString parses a RESP bulk string and returns its value.
 // @returns string: the decoded bulk string without the leading '$' and trailing '\r\n',
-// @returns "nil" if the bulk string is null.
+// distinguishing a genuinely empty payload ("$0", returns "") from a null
+// bulk string ("$-1", returns "nil") — the two are not the same value.
 func DecodeBulkString(reader *bufio.Reader, data []byte) string {
 	if reader != nil {
 		p := New(reader)
-		line, err := p.readBulkString()
+		value, isNull, err := p.readBulkString()
 		if err != nil {
 			return "(error) " + err.Error()
 		}
-		if line == "" {
+		if isNull {
 			return "nil"
 		}
-		return line
-	}
-
-	if string(data) == "$-1\r\n" {
-		return "nil"
+		return value
 	}
 
 	p := New(bytes.NewReader(data))
 
-	bulkString, err := p.readBulkString()
+	value, isNull, err := p.readBulkString()
 	if err != nil {
 		return "nil"
 	}
+	if isNull {
+		return "nil"
+	}
 
-	return bulkString
+	return value
 }
