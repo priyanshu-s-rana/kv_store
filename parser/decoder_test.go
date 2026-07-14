@@ -1,6 +1,7 @@
 package parser
 
 import (
+	"bufio"
 	"strings"
 	"testing"
 )
@@ -102,6 +103,34 @@ func TestDecodeBulkStringInvalid(t *testing.T) {
 		if got := DecodeBulkString(nil, input); got != "nil" {
 			t.Errorf("DecodeBulkString(%q) = %q, want \"nil\"", input, got)
 		}
+	}
+}
+
+// TestDecodeBulkStringReaderPathDistinguishesNullFromEmpty drives
+// DecodeBulkString through a real *bufio.Reader (the reader != nil branch),
+// which is the code path every live connection actually uses via
+// ReadResponse. This is distinct from the byte-slice (reader == nil) branch
+// exercised by TestDecodeBulkString/TestDecodeBulkStringNull above — the two
+// branches previously disagreed on whether a valid, merely-empty payload
+// ("$0\r\n\r\n") was distinguishable from the null bulk string ("$-1\r\n").
+func TestDecodeBulkStringReaderPathDistinguishesNullFromEmpty(t *testing.T) {
+	cases := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{"null bulk string", "$-1\r\n", "nil"},
+		{"empty bulk string", "$0\r\n\r\n", ""},
+		{"non-empty bulk string", "$5\r\nhello\r\n", "hello"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			reader := bufio.NewReader(strings.NewReader(c.input))
+			data, _ := reader.Peek(1)
+			if got := DecodeBulkString(reader, data); got != c.want {
+				t.Errorf("DecodeBulkString(reader, %q) = %q, want %q", c.input, got, c.want)
+			}
+		})
 	}
 }
 

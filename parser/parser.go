@@ -63,7 +63,7 @@ func (p *Parser) ReadCommand() (*Command, error) {
 
 	parts := make([]string, 0, arrLength)
 	for range arrLength {
-		cmdString, err := p.readBulkString()
+		cmdString, _, err := p.readBulkString()
 		if err != nil {
 			return nil, err
 		}
@@ -112,33 +112,34 @@ func (p *Parser) parseLine(line string) (*Command, error) {
 // Payload is read with io.ReadFull so it is binary-safe (CRLF and NUL
 // bytes inside the payload are preserved).
 // @returns string: the payload bytes as a string.
-// @returns "", nil: for the null bulk string "$-1".
+// @returns isNull: true only for the null bulk string "$-1" — distinct from
+// a valid, merely-empty payload ("$0"), which returns ("", false, nil).
 // @returns error: on malformed header or truncated payload.
-func (p *Parser) readBulkString() (string, error) {
+func (p *Parser) readBulkString() (value string, isNull bool, err error) {
 	line, err := p.readLine()
 	if err != nil {
-		return "", err
+		return "", false, err
 	}
 
 	if len(line) == 0 || line[0] != '$' {
-		return "", fmt.Errorf(constants.INV_STR_PARSER, line)
+		return "", false, fmt.Errorf(constants.INV_STR_PARSER, line)
 	}
 
 	// Null bulk string
 	if line == "$-1" {
-		return "", nil
+		return "", true, nil
 	}
 
 	length, err := strconv.Atoi(line[1:])
 	if err != nil {
-		return "", fmt.Errorf(constants.INV_STR_PARSER, line)
+		return "", false, fmt.Errorf(constants.INV_STR_PARSER, line)
 	}
 
 	buf := make([]byte, length+2) // +2 for \r\n
 	_, err = io.ReadFull(p.reader, buf)
 	if err != nil {
-		return "", err
+		return "", false, err
 	}
 
-	return string(buf[:length]), nil
+	return string(buf[:length]), false, nil
 }
