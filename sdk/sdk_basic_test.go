@@ -10,6 +10,7 @@ import (
 
 	"github.com/priyanshu-s-rana/kv_store/constants"
 	"github.com/priyanshu-s-rana/kv_store/metrics"
+	"github.com/priyanshu-s-rana/kv_store/models"
 	"github.com/priyanshu-s-rana/kv_store/server"
 	"github.com/priyanshu-s-rana/kv_store/store"
 )
@@ -33,7 +34,9 @@ func TestMain(m *testing.M) {
 	st := store.New(0, cmdChan, fakePersistence{}, metricsManager.Store)
 	st.Start()
 	srv := server.New(testAddr, cmdChan, st, metricsManager.Server)
-	go srv.Start()
+	// Zero-value CFG leaves Debug.Pprof.Enable false, so tests don't spin up
+	// a pprof HTTP server on a hardcoded port.
+	go srv.Start(models.CFG{})
 
 	// Wait until the server is ready.
 	for i := 0; i < 20; i++ {

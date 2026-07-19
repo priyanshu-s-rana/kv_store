@@ -53,8 +53,7 @@ func NewAOF(config *AOFConfig, metrics PersistenceMetrics) (*AOF, error) {
 }
 
 func (aof *AOF) Append(name constants.CmdName, args []string, sequenceID uint64) error {
-	parts := append([]string{constants.SequenceID, strconv.FormatUint(sequenceID, 10), string(name)}, args...)
-	command := parser.Array(parts...)
+	command := parser.AOFArray(sequenceID, name, args)
 
 	aof.mu.Lock()
 	n, err := aof.writer.Write(command)

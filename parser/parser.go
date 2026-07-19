@@ -31,17 +31,18 @@ func New(r io.Reader) *Parser {
 // Auto-detects the wire format from the first byte:
 // - '*' starts a RESP array of bulk strings.
 // - Anything else is treated as an inline whitespace-separated line.
-// @returns *Command: the parsed command with uppercased Name and raw Args.
+// @returns Command: the parsed command with uppercased Name and raw Args.
 // @returns io.EOF: when the stream is exhausted cleanly.
 // @returns error: on malformed input, bad length, or truncated bulk string.
-func (p *Parser) ReadCommand() (*Command, error) {
+func (p *Parser) ReadCommand() (Command, error) {
 	var line string
 	var err error
+	var cmd Command
 
 	for {
 		line, err = p.readLine()
 		if err != nil {
-			return nil, err
+			return cmd, err
 		}
 		if strings.TrimSpace(line) != "" {
 			break
@@ -54,30 +55,29 @@ func (p *Parser) ReadCommand() (*Command, error) {
 
 	arrLength, err := strconv.Atoi(line[1:])
 	if err != nil {
-		return nil, fmt.Errorf(constants.INV_ARRAY_LEN, line)
+		return cmd, fmt.Errorf(constants.INV_ARRAY_LEN, line)
 	}
 
 	if arrLength <= 0 {
-		return nil, fmt.Errorf(constants.INV_CMD_ARRAY_LEN, arrLength)
+		return cmd, fmt.Errorf(constants.INV_CMD_ARRAY_LEN, arrLength)
 	}
 
 	parts := make([]string, 0, arrLength)
 	for range arrLength {
 		cmdString, _, err := p.readBulkString()
 		if err != nil {
-			return nil, err
+			return cmd, err
 		}
 		parts = append(parts, cmdString)
 	}
 
 	if len(parts) == 0 {
-		return nil, fmt.Errorf(constants.EMPTY_CMD)
+		return cmd, fmt.Errorf(constants.EMPTY_CMD)
 	}
 
-	return &Command{
-		Name: constants.CmdName(strings.ToUpper(parts[0])),
-		Args: parts[1:],
-	}, nil
+	cmd.Name = constants.CmdName(strings.ToUpper(parts[0]))
+	cmd.Args = parts[1:]
+	return cmd, nil
 }
 
 // readLine reads one '\n'-terminated line from the buffered reader.
@@ -93,15 +93,15 @@ func (p *Parser) readLine() (string, error) {
 
 // parseLine parses an inline-format command from a single line.
 // Splits on whitespace (collapsing runs) and uppercases the verb.
-// @returns *Command: Name is parts[0] uppercased, Args is the rest.
+// @returns Command: Name is parts[0] uppercased, Args is the rest.
 // @returns error: if the line contains no tokens.
-func (p *Parser) parseLine(line string) (*Command, error) {
+func (p *Parser) parseLine(line string) (Command, error) {
 	parts := strings.Fields(line)
 	if len(parts) == 0 {
-		return nil, fmt.Errorf(constants.EMPTY_CMD)
+		return Command{}, fmt.Errorf(constants.EMPTY_CMD)
 	}
 
-	return &Command{
+	return Command{
 		Name: constants.CmdName(strings.ToUpper(parts[0])),
 		Args: parts[1:],
 	}, nil

@@ -26,4 +26,11 @@ type CFG struct {
 	Memory struct {
 		MaxSize int64 `mapstructure:"max_size"`
 	} `mapstructure:"memory"`
+	Debug struct {
+		Pprof struct {
+			Enable bool   `mapstructure:"enable"`
+			Host   string `mapstructure:"host"`
+			Port   string `mapstructure:"port"`
+		} `mapstructure:"pprof"`
+	} `mapstructure:"debug"`
 }
