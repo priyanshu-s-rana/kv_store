@@ -110,7 +110,7 @@ func main() {
 
 	server := server.New(addr, cmdChan, store, metrics.Server)
 	log.Printf("[main] KV Store starting server on port %s", port)
-	if err = server.Start(); err != nil {
+	if err = server.Start(CONFIG); err != nil {
 		log.Fatalf("[main] server error: %v", err)
 	}
 }

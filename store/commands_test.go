@@ -1234,10 +1234,13 @@ func TestSnapshotIsDecoupledFromStore(t *testing.T) {
 	}
 }
 
-// Verifies capture deep-copies value bytes, not just the map: mutating the
-// live entry's underlying byte slice after capture must not corrupt the
-// already-captured snapshot.
-func TestSnapshotCaptureDeepCopiesValueBytes(t *testing.T) {
+// TestSnapshotCaptureIsShallowClone documents the copy-on-write design:
+// capture() intentionally shares the live entry's backing array instead of
+// deep-copying it, to avoid an allocation+copy per key on every checkpoint.
+// This is safe only because every write path (set, mset, incrBy, expire, ...)
+// always replaces the whole *entry pointer in s.data via setKey rather than
+// mutating entry.value's bytes in place — see TestSnapshotCaptureSafeAcrossNormalWrites.
+func TestSnapshotCaptureIsShallowClone(t *testing.T) {
 	s := newTestStore()
 	s.data["k"] = &entry{value: []byte("value")}
 
@@ -1246,10 +1249,31 @@ func TestSnapshotCaptureDeepCopiesValueBytes(t *testing.T) {
 		t.Fatalf("capture err = %v, want nil", err)
 	}
 
-	s.data["k"].value[0] = 'X'
+	if &data["k"].Value[0] != &s.data["k"].value[0] {
+		t.Errorf("captured value does not share the live entry's backing array; capture() is expected to shallow-clone for copy-on-write")
+	}
+}
+
+// TestSnapshotCaptureSafeAcrossNormalWrites verifies the invariant that makes
+// capture()'s shallow clone safe: a normal write (Set) to an already-captured
+// key must not corrupt the snapshot, because setKey always swaps in a brand
+// new *entry rather than mutating the existing entry's value bytes in place.
+func TestSnapshotCaptureSafeAcrossNormalWrites(t *testing.T) {
+	s := newTestStore()
+	s.data["k"] = &entry{value: []byte("value")}
+
+	data, err := s.capture()
+	if err != nil {
+		t.Fatalf("capture err = %v, want nil", err)
+	}
+
+	assertValue(t, s.set([]string{"k", "updated"}), respSimple(constants.OK))
 
 	if string(data["k"].Value) != "value" {
-		t.Errorf("captured value = %q, want %q (capture must not alias the live entry's bytes)", data["k"].Value, "value")
+		t.Errorf("captured value = %q, want %q (a subsequent Set must not mutate an already-captured snapshot)", data["k"].Value, "value")
+	}
+	if string(s.data["k"].value) != "updated" {
+		t.Errorf("live value = %q, want %q", s.data["k"].value, "updated")
 	}
 }
 

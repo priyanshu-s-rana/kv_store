@@ -26,15 +26,16 @@ func (se *SnapshotEntry) IsExpired() bool {
 }
 
 func (s *Store) capture() (map[string]SnapshotEntry, error) {
-	data := make(map[string]SnapshotEntry, len(s.data))
+	exportedSnapshot := make(map[string]SnapshotEntry, len(s.data))
 	for k, e := range s.data {
 		if e.isExpired() {
 			continue
 		}
-		value := make([]byte, len(e.value))
-		copy(value, e.value)
-		data[k] = SnapshotEntry{Value: value, Expiry: e.expiry}
+		exportedSnapshot[k] = SnapshotEntry{
+			Value:  e.value,
+			Expiry: e.expiry,
+		}
 	}
 
-	return data, nil
+	return exportedSnapshot, nil
 }

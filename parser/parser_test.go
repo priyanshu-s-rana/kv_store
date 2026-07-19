@@ -8,18 +8,15 @@ import (
 
 // parse wraps input in a strings.Reader, builds a Parser, and reads one
 // command. Shorthand used by every single-command test.
-func parse(t *testing.T, input string) (*Command, error) {
+func parse(t *testing.T, input string) (Command, error) {
 	t.Helper()
 	return New(strings.NewReader(input)).ReadCommand()
 }
 
-// assertCmd checks that got is non-nil and matches the expected name + args.
+// assertCmd checks that got matches the expected name + args.
 // Fails the test on mismatch with a descriptive message.
-func assertCmd(t *testing.T, got *Command, name string, args ...string) {
+func assertCmd(t *testing.T, got Command, name string, args ...string) {
 	t.Helper()
-	if got == nil {
-		t.Fatalf("Command is nil")
-	}
 	if string(got.Name) != name {
 		t.Errorf("Name = %q, want %q", got.Name, name)
 	}

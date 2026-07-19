@@ -100,10 +100,15 @@ func (s *Store) expire(args []string) Response {
 		return Response{Value: parser.Error(constants.INV_EXPIRY)}
 	}
 
-	e.expiry = time.Now().Add(time.Duration(secs) * time.Second)
-	item := ttlItem{key: key, expiresAt: e.expiry}
+	expiry := time.Now().Add(time.Duration(secs) * time.Second)
+	newEntry := entry{
+		value:  e.value,
+		expiry: expiry,
+	}
+	item := ttlItem{key: key, expiresAt: expiry}
 	s.ttls.Push(item)
-	s.memoryProfile.recordTTLSize(&item)
+
+	setKey(s, key, &newEntry, &item)
 	makeRoom(s)
 	return Response{Value: parser.Integer(constants.ONE)}
 }

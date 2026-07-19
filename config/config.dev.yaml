@@ -17,3 +17,9 @@ PERSISTENCE:
 
 MEMORY:
   MAX_SIZE: 0 # bytes, 0 = unlimited
+
+DEBUG:
+  PPROF:
+    ENABLE: True
+    HOST: "localhost"
+    PORT: "6060"

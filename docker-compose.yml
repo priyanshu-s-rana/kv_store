@@ -8,6 +8,7 @@ services:
     ports:
       - "5040:5040"
       - "9090:9090"
+      - "6060:6060"
     environment:
       APP_ENV: prod
     volumes:

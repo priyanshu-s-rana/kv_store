@@ -5,6 +5,9 @@ import (
 	"io"
 	"log"
 	"net"
+	"net/http"
+	_ "net/http/pprof"
+	"runtime"
 	"sync/atomic"
 	"time"
 
@@ -36,10 +39,25 @@ func New(addr string, cmdChan chan<- models.Command, store *store.Store, metrics
 // Start listens on s.addr and spawns a goroutine per accepted connection.
 // Runs indefinitely; accept errors are logged and skipped, not fatal.
 // @returns error: if the TCP listener itself cannot be created.
-func (s *Server) Start() error {
+func (s *Server) Start(config models.CFG) error {
 	ln, err := net.Listen("tcp", s.addr)
 	if err != nil {
 		return fmt.Errorf("failed to start server on %s: %v", s.addr, err)
+	}
+
+	if config.Debug.Pprof.Enable {
+		runtime.SetBlockProfileRate(1)
+		runtime.SetMutexProfileFraction(1)
+
+		go func() {
+			addr := config.Debug.Pprof.Host + ":" + config.Debug.Pprof.Port
+
+			log.Printf("pprof listening on http://%s/debug/pprof/", addr)
+
+			if err := http.ListenAndServe(addr, nil); err != nil {
+				log.Printf("pprof server stopped: %v", err)
+			}
+		}()
 	}
 
 	log.Printf("[server] listening on %s\n", s.addr)

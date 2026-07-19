@@ -26,7 +26,7 @@ func newTestAOF(t *testing.T, policy string) (*AOF, string) {
 }
 
 // readAllCommands parses every RESP command sequentially out of the file at path.
-func readAllCommands(t *testing.T, path string) []*parser.Command {
+func readAllCommands(t *testing.T, path string) []parser.Command {
 	t.Helper()
 	f, err := os.Open(path)
 	if err != nil {
@@ -35,7 +35,7 @@ func readAllCommands(t *testing.T, path string) []*parser.Command {
 	defer f.Close()
 
 	p := parser.New(f)
-	var cmds []*parser.Command
+	var cmds []parser.Command
 	for {
 		cmd, err := p.ReadCommand()
 		if err == io.EOF {
