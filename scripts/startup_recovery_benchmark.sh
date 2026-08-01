@@ -149,16 +149,18 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# Polls until the bench port accepts connections; echoes elapsed
-# seconds (~50ms resolution via iteration-count, portable across
-# GNU/BSD date which disagree on sub-second %N support).
+# Polls until the server actually responds to a real command (see
+# ping_ok in lib/common.sh — a bare TCP connect succeeds too early to
+# use as a recovery-time measurement); echoes elapsed seconds (~50ms
+# resolution via iteration-count, portable across GNU/BSD date which
+# disagree on sub-second %N support).
 time_until_ready() {
     local interval="0.05"
     local max_wait=120
     local count=0
     local max_iters
     max_iters=$(awk -v w="$max_wait" -v i="$interval" 'BEGIN{printf "%d", w / i}')
-    while ! nc -z "$BENCH_HOST" "$BENCH_PORT" 2>/dev/null; do
+    while ! ping_ok "$BENCH_HOST" "$BENCH_PORT"; do
         sleep "$interval"
         count=$((count + 1))
         if (( count >= max_iters )); then

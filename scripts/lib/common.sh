@@ -178,10 +178,25 @@ check_kv_server() {
     docker compose ps --status running --services | grep -qx "kv-server"
 }
 
+# Application-level readiness check. A bare TCP connect (nc -z) can
+# succeed before the app inside is actually ready: on Docker Desktop
+# for Mac, the host-side port-forwarding proxy accepts connections as
+# soon as the container starts, before the server process has finished
+# recovery and bound its own listener — confirmed in practice (this is
+# what caused early "Connection reset by peer" failures right after a
+# container recreate). A real PING/PONG round-trip only succeeds once
+# the server is actually processing commands.
+ping_ok() {
+    local host="$1" port="$2"
+    local resp
+    resp=$(printf 'PING\r\n' | nc -w 1 "$host" "$port" 2>/dev/null)
+    [[ "$resp" == *"PONG"* ]]
+}
+
 wait_for_server() {
     local timeout=30
     echo "Waiting for KV Server..."
-    while ! nc -z "$HOST" "$PORT"; do
+    while ! ping_ok "$HOST" "$PORT"; do
         ((timeout--))
         if (( timeout == 0 )); then
             echo "Timed out waiting for server." >&2
