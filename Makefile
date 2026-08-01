@@ -1,6 +1,7 @@
 .PHONY: setup executable fmt vet build build-server build-cli install \
         test test-integration test-fuzz-seeds coverage \
-        bench bench-quick bench-macro bench-recovery bench-all bench-compare \
+        bench bench-quick bench-macro bench-recovery bench-runtime bench-profile \
+        bench-all bench-compare \
         stress-readwrite stress-ttl-churn stress-pubsub-churn stress-contention \
         stress-crash-cycles stress-all
 
@@ -15,6 +16,7 @@ setup: executable
 executable:
 	chmod +x scripts/*.sh scripts/lib/*.sh
 	chmod +x scripts/stress/*.sh 2>/dev/null || true
+	chmod +x scripts/benchmark/*.sh 2>/dev/null || true
 
 # Manual format — useful in CI or before opening a PR.
 fmt:
@@ -94,6 +96,7 @@ ARGS ?=
 MICRO_ARGS ?= $(ARGS)
 MACRO_ARGS ?= $(ARGS)
 RECOVERY_ARGS ?= $(ARGS)
+RUNTIME_ARGS ?= $(ARGS)
 
 # Named knobs (all optional/blank by default — only added to the command
 # line when set). ITERATIONS is shared: redis_benchmark.sh and
@@ -105,6 +108,9 @@ CONCURRENCY ?=
 CLIENTS ?=
 THREADS ?=
 TEST_TIME ?=
+BENCH ?=
+BENCHTIME ?=
+COUNT ?=
 
 MICRO_FLAGS := $(if $(REQUESTS),--requests $(REQUESTS)) \
                $(if $(ITERATIONS),--iterations $(ITERATIONS)) \
@@ -113,6 +119,9 @@ MACRO_FLAGS := $(if $(CLIENTS),--clients $(CLIENTS)) \
                $(if $(THREADS),--threads $(THREADS)) \
                $(if $(TEST_TIME),--test-time $(TEST_TIME))
 RECOVERY_FLAGS := $(if $(ITERATIONS),--iterations $(ITERATIONS))
+RUNTIME_FLAGS := $(if $(BENCH),--bench $(BENCH)) \
+                  $(if $(BENCHTIME),--benchtime $(BENCHTIME)) \
+                  $(if $(COUNT),--count $(COUNT))
 
 # Smoke test: tiny requests/iterations, single concurrency/payload/keyspace.
 # Good for checking the pipeline works before committing to a full run.
@@ -136,11 +145,21 @@ bench-macro: executable
 bench-recovery: executable
 	./scripts/startup_recovery_benchmark.sh $(NAME) $(RECOVERY_FLAGS) $(RECOVERY_ARGS)
 
-# Runs all three suites (micro, macro, startup/recovery) under ONE shared
-# benchmarks/<name>_<timestamp>/ directory — computes a single timestamp
-# and exports it as RUN_ID so each script reuses it instead of picking its
-# own. Continues past a failing suite so one bad suite doesn't lose the
-# others' results; exits non-zero at the end if any suite failed.
+# Go-level runtime benchmarks (ns/op, B/op, allocs/op) for the hot-path
+# packages only (parser, store, persistence) — answers "why" a throughput
+# change happened, complementing bench/bench-macro/bench-recovery above.
+# No docker/server involved — just `go test -bench -benchmem` in-process.
+# See benchmarks/README.md.
+bench-runtime: executable
+	./scripts/benchmark/runtime_benchmark.sh $(NAME) $(RUNTIME_FLAGS) $(RUNTIME_ARGS)
+
+# Runs all four suites (micro, macro, startup/recovery, runtime) under ONE
+# shared benchmarks/<name>_<timestamp>/ directory — computes a single
+# timestamp and exports it as RUN_ID so each script reuses it instead of
+# picking its own. Continues past a failing suite so one bad suite doesn't
+# lose the others' results; exits non-zero at the end if any suite failed.
+# Deliberately excludes bench-profile — pprof generation is diagnostic, not
+# a routine part of every benchmark run; run it separately when needed.
 bench-all: executable
 	@run_id="$$(date +"%Y-%m-%d_%H-%M-%S")"; \
 	out_dir="benchmarks/$(NAME)_$${run_id}"; \
@@ -152,6 +171,8 @@ bench-all: executable
 	RUN_ID="$$run_id" ./scripts/memtier_benchmark.sh $(NAME) $(MACRO_FLAGS) $(MACRO_ARGS) || status=1; \
 	echo "--- startup/recovery ---"; \
 	RUN_ID="$$run_id" ./scripts/startup_recovery_benchmark.sh $(NAME) $(RECOVERY_FLAGS) $(RECOVERY_ARGS) || status=1; \
+	echo "--- runtime ---"; \
+	RUN_ID="$$run_id" ./scripts/benchmark/runtime_benchmark.sh $(NAME) $(RUNTIME_FLAGS) $(RUNTIME_ARGS) || status=1; \
 	echo; \
 	if [ "$$status" -eq 0 ]; then \
 		echo "All suites completed: $${out_dir}/"; \
@@ -159,6 +180,15 @@ bench-all: executable
 		echo "One or more suites failed. See output above. Partial results: $${out_dir}/" >&2; \
 	fi; \
 	exit $$status
+
+# Diagnostic-only: generates pprof profiles (cpu/heap/allocs/block/mutex)
+# from the same Go runtime benchmarks bench-runtime uses, one set per
+# hot-path package. NOT part of bench-all — profiling changes what's being
+# measured (instrumentation overhead) and produces large binary artifacts,
+# so it's opt-in, run on demand when a benchmark result needs explaining.
+# See benchmarks/README.md for how to inspect the resulting profiles.
+bench-profile: executable
+	./scripts/benchmark/runtime_benchmark.sh $(NAME) --profile $(RUNTIME_FLAGS) $(RUNTIME_ARGS)
 
 # Compares two redis_benchmark.sh run directories.
 #   make bench-compare BASELINE=benchmarks/main_<ts> CANDIDATE=benchmarks/branch_<ts>

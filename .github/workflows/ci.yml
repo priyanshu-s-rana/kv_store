@@ -1,0 +1,124 @@
+name: Performance CI
+
+# Fast, per-PR performance signal — distinct from the correctness-focused
+# `CI` workflow (ci.yaml): this one only runs `go test ./...` plus the
+# in-process Go runtime benchmarks (scripts/benchmark/runtime_benchmark.sh),
+# never the Docker-backed throughput suites (redis-benchmark/memtier/
+# startup-recovery) or pprof profiling — those are deliberately reserved
+# for performance.yml / profile.yml so this stays fast on every PR.
+# See benchmarks/README.md and docs/benchmarks/runtime.md.
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+# Repeated pushes to the same PR/branch supersede each other — no need to
+# let an earlier, now-stale run keep consuming a runner.
+concurrency:
+  group: performance-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  fast-performance:
+    name: Fast Performance Validation
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        id: setup-go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Record start time
+        run: echo "START_TIME=$(date +%s)" >> "$GITHUB_ENV"
+
+      # Pinned once here so this run's runtime-benchmark output lands at a
+      # path we know ahead of time (benchmarks/ci_<RUN_ID>/runtime/) instead
+      # of having to glob for it afterward — runtime_benchmark.sh honors a
+      # pre-set RUN_ID from the environment (see scripts/benchmark/
+      # runtime_benchmark.sh), same as the other three benchmark scripts.
+      - name: Set benchmark run id
+        run: echo "RUN_ID=$(date +%Y-%m-%d_%H-%M-%S)" >> "$GITHUB_ENV"
+
+      - name: Run unit tests
+        id: unit_tests
+        run: go test ./...
+
+      # Deliberately NOT bench-all / bench-profile — see the file header.
+      - name: Run runtime benchmarks
+        id: runtime_bench
+        run: |
+          make bench-runtime \
+            NAME=ci \
+            BENCHTIME=1s \
+            COUNT=1
+
+      - name: Write performance summary
+        if: always()
+        run: |
+          status_icon() {
+            case "$1" in
+              success) echo "✅ Passed" ;;
+              failure) echo "❌ Failed" ;;
+              skipped) echo "⏭️ Skipped" ;;
+              *) echo "⚠️ ${1:-unknown}" ;;
+            esac
+          }
+
+          end_time=$(date +%s)
+          elapsed=$(( end_time - START_TIME ))
+          doc_url="https://github.com/${{ github.repository }}/blob/${{ github.sha }}/docs/benchmarks/runtime.md"
+
+          {
+            echo "## Performance Health"
+            echo ""
+            echo "| Suite | Status |"
+            echo "|---|---|"
+            echo "| Unit Tests | $(status_icon "${{ steps.unit_tests.outcome }}") |"
+            echo "| Runtime Benchmarks | $(status_icon "${{ steps.runtime_bench.outcome }}") |"
+            echo ""
+            echo "## CI Summary"
+            echo ""
+            echo "| | |"
+            echo "|---|---|"
+            echo "| Repository | \`${{ github.repository }}\` |"
+            echo "| Branch | \`${{ github.head_ref || github.ref_name }}\` |"
+            echo "| Commit | \`${{ github.sha }}\` |"
+            echo "| Go Version | \`${{ steps.setup-go.outputs.go-version }}\` |"
+            echo "| Execution Time | ${elapsed}s |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          csv="benchmarks/ci_${RUN_ID}/runtime/benchmem_summary.csv"
+          {
+            echo ""
+            echo "## Runtime Benchmarks"
+            echo ""
+            echo "Metrics: \`ns/op\` ↓ · \`B/op\` ↓ · \`allocs/op\` ↓"
+            echo ""
+            echo "See [docs/benchmarks/runtime.md](${doc_url}) for what these mean and how to interpret them."
+            echo ""
+          } >> "$GITHUB_STEP_SUMMARY"
+          .github/scripts/csv_to_markdown.sh "$csv" >> "$GITHUB_STEP_SUMMARY"
+
+          {
+            echo ""
+            echo "### Artifact"
+            echo ""
+            echo "Download \`runtime-benchmarks-${{ github.run_id }}\` from this run's **Artifacts** section (bottom of the run summary page) for the full \`benchmem.txt\`/\`benchmem_summary.csv\`."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload runtime benchmark artifact
+        if: always() && steps.runtime_bench.outcome != 'skipped'
+        uses: actions/upload-artifact@v4
+        with:
+          name: runtime-benchmarks-${{ github.run_id }}
+          path: benchmarks/ci_${{ env.RUN_ID }}/runtime/
+          retention-days: 14
+          if-no-files-found: ignore

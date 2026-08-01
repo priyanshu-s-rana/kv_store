@@ -1,0 +1,257 @@
+name: Performance
+
+# The project's automated full benchmark run: the complete suite
+# (redis-benchmark micro, memtier macro, startup/recovery, Go runtime
+# benchmarks) via `make bench-all` — see benchmarks/README.md. Deliberately
+# NOT run on every PR (ci.yml covers that, fast-only); this is the
+# Docker-backed, multi-minute pipeline, so it runs on push to main instead
+# — every full benchmark run corresponds to a real code change rather than
+# repeating the same commit on a fixed clock.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      name:
+        description: 'Run name (results land in benchmarks/<name>_<timestamp>/)'
+        required: false
+        default: 'performance'
+      quick:
+        description: 'Smoke-test mode (tiny requests/iterations) instead of a full run'
+        required: false
+        default: false
+        type: boolean
+
+env:
+  RUN_NAME: ${{ inputs.name || 'performance' }}
+
+jobs:
+  performance-benchmarks:
+    name: Full Benchmark Suite
+    runs-on: ubuntu-latest
+    # A full bench-all is a multi-suite, multi-minute Docker pipeline (see
+    # the header comment above) — generous but bounded so a hung
+    # container/benchmark doesn't burn runner time indefinitely.
+    timeout-minutes: 120
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        id: setup-go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # redis_benchmark.sh and startup_recovery_benchmark.sh both hard-
+      # require redis-benchmark (see each script's check_dependency /
+      # dependency loop) — not preinstalled on GitHub-hosted runners.
+      # memtier_benchmark is deliberately NOT installed here: it has no
+      # apt package and building it from source is a heavy, brittle add
+      # for a CI runner; memtier_benchmark.sh already exits 0 and skips
+      # the macro suite gracefully when the binary is missing (see the
+      # script), which is exactly what will happen below — surfaced in the
+      # dashboard as "Memtier: ⏭️ Skipped", not a failure.
+      - name: Install redis-benchmark
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y redis-tools
+
+      - name: Record start time
+        run: echo "START_TIME=$(date +%s)" >> "$GITHUB_ENV"
+
+      - name: Run unit tests
+        id: unit_tests
+        run: go test ./...
+
+      # bench-all's own Makefile recipe always computes its own fresh
+      # RUN_ID internally (see Makefile) rather than honoring one from the
+      # environment, so — unlike ci.yml/profile.yml — the output directory
+      # isn't knowable ahead of time; it's discovered from the filesystem
+      # in the next step instead. Output is tee'd to a log file so the
+      # summary step below can determine each suite's pass/fail/skip
+      # status from the same completion messages the scripts already print
+      # (see benchmarks/README.md for what each script prints) — bench-all
+      # itself only surfaces a single combined exit code.
+      - name: Run full benchmark suite
+        id: bench_all
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          ARGS=""
+          if [[ "${{ inputs.quick }}" == "true" ]]; then
+            ARGS="--quick"
+          fi
+          make bench-all NAME="$RUN_NAME" ARGS="$ARGS" 2>&1 | tee bench-all.log
+
+      - name: Locate run directory
+        if: always()
+        run: |
+          out_dir=$(ls -td "benchmarks/${RUN_NAME}_"*/ 2>/dev/null | head -1 || true)
+          echo "OUT_DIR=${out_dir%/}" >> "$GITHUB_ENV"
+
+      - name: Write performance summary
+        if: always()
+        run: |
+          status_icon() {
+            case "$1" in
+              success) echo "✅ Passed" ;;
+              failure) echo "❌ Failed" ;;
+              skipped) echo "⏭️ Skipped" ;;
+              *) echo "⚠️ ${1:-unknown}" ;;
+            esac
+          }
+
+          log="bench-all.log"
+          touch "$log"
+
+          if [[ "${{ steps.bench_all.outcome }}" == "skipped" ]]; then
+            # bench-all itself never ran (e.g. the preceding "Run unit
+            # tests" step failed, which — with no continue-on-error there —
+            # skips everything after it except the if: always() steps).
+            # Nothing to grep; every suite below is "didn't run", not
+            # "ran and failed".
+            redis_status="skipped"
+            memtier_status="skipped"
+            startup_status="skipped"
+            runtime_status="skipped"
+          else
+            # Micro (redis-benchmark)
+            redis_status="failure"
+            grep -q '^Benchmark completed\.$' "$log" && redis_status="success"
+
+            # Macro (memtier) — three distinct outcomes, see the install
+            # step's comment for why "skipped" is an expected, not a
+            # failed, result on these runners today.
+            memtier_status="failure"
+            if grep -q 'not found — skipping macro suite\.' "$log"; then
+              memtier_status="skipped"
+            elif grep -q '^Macro benchmark completed\.$' "$log"; then
+              memtier_status="success"
+            fi
+
+            # Startup/recovery — the script always reaches its final
+            # message regardless of individual scenario failures (see
+            # startup_recovery_benchmark.sh); per-scenario detail is in
+            # its own summary.csv table further down, not collapsed into
+            # this single dashboard row.
+            startup_status="failure"
+            grep -q '^Startup/recovery benchmark completed\.$' "$log" && startup_status="success"
+
+            # Runtime (Go microbenchmarks)
+            runtime_status="failure"
+            grep -q '^Runtime benchmark completed\.$' "$log" && runtime_status="success"
+          fi
+
+          end_time=$(date +%s)
+          elapsed=$(( end_time - START_TIME ))
+          doc_url="https://github.com/${{ github.repository }}/blob/${{ github.sha }}/docs/benchmarks/runtime.md"
+          machine="${{ runner.os }} / ${{ runner.arch }}"
+          if [[ -n "${OUT_DIR:-}" && -f "${OUT_DIR}/benchmark_info.txt" ]]; then
+            cpu_line=$(grep '^CPU:' "${OUT_DIR}/benchmark_info.txt" || true)
+            [[ -n "$cpu_line" ]] && machine="${cpu_line#CPU: } (${{ runner.os }}/${{ runner.arch }})"
+          fi
+
+          {
+            echo "## Performance Health"
+            echo ""
+            echo "| Suite | Status |"
+            echo "|---|---|"
+            echo "| Unit Tests | $(status_icon "${{ steps.unit_tests.outcome }}") |"
+            echo "| Runtime Benchmarks | $(status_icon "$runtime_status") |"
+            echo "| Redis Benchmark | $(status_icon "$redis_status") |"
+            echo "| Memtier | $(status_icon "$memtier_status") |"
+            echo "| Startup / Recovery | $(status_icon "$startup_status") |"
+            echo ""
+            echo "## Performance Summary"
+            echo ""
+            echo "| | |"
+            echo "|---|---|"
+            echo "| Repository | \`${{ github.repository }}\` |"
+            echo "| Branch | \`${{ github.ref_name }}\` |"
+            echo "| Commit | \`${{ github.sha }}\` |"
+            echo "| Benchmark Date | $(date -u +'%Y-%m-%d %H:%M UTC') |"
+            echo "| Machine | $machine |"
+            echo "| Go Version | \`${{ steps.setup-go.outputs.go-version }}\` |"
+            echo "| Execution Time | ${elapsed}s |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [[ -z "${OUT_DIR:-}" ]]; then
+            {
+              echo ""
+              echo "_No benchmark run directory was produced — bench-all did not run (see Unit Tests status above)._"
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            {
+              echo ""
+              echo "## Runtime Benchmarks"
+              echo ""
+              echo "Metrics: \`ns/op\` ↓ · \`B/op\` ↓ · \`allocs/op\` ↓ — see [docs/benchmarks/runtime.md](${doc_url})."
+              echo ""
+            } >> "$GITHUB_STEP_SUMMARY"
+            .github/scripts/csv_to_markdown.sh "${OUT_DIR}/runtime/benchmem_summary.csv" >> "$GITHUB_STEP_SUMMARY"
+
+            {
+              echo ""
+              echo "## Redis Benchmark"
+              echo ""
+              echo "First 20 rows of the core sweep (median values); the full sweep — every concurrency level plus the payload/keyspace/batch/pipeline dimensions, and the mean/stddev columns behind each median — is in the uploaded artifact's \`summary.csv\`:"
+              echo ""
+            } >> "$GITHUB_STEP_SUMMARY"
+            # +2 for the header/separator rows csv_to_markdown.sh emits.
+            .github/scripts/csv_to_markdown.sh "${OUT_DIR}/summary.csv" "Command,Concurrency,rps,p50,P99,OpsSec" \
+              | head -22 >> "$GITHUB_STEP_SUMMARY"
+
+            {
+              echo ""
+              echo "## Memtier"
+              echo ""
+            } >> "$GITHUB_STEP_SUMMARY"
+            .github/scripts/csv_to_markdown.sh "${OUT_DIR}/macro/summary.csv" >> "$GITHUB_STEP_SUMMARY"
+
+            {
+              echo ""
+              echo "## Startup / Recovery"
+              echo ""
+            } >> "$GITHUB_STEP_SUMMARY"
+            .github/scripts/csv_to_markdown.sh "${OUT_DIR}/startup_recovery/summary.csv" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+          {
+            echo ""
+            echo "### Artifacts"
+            echo ""
+            echo "Download from this run's **Artifacts** section (bottom of the run summary page):"
+            echo "- \`performance-log-${{ github.run_id }}\` — combined bench-all output log"
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [[ -n "${OUT_DIR:-}" ]]; then
+            echo "- \`performance-benchmarks-${{ github.run_id }}\` — the full run directory (all summary.csv files, raw redis-benchmark/memtier output, metrics snapshots)" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+          # The combined bench-all step used continue-on-error so this
+          # summary always gets written even when a suite fails; now that
+          # it's written, fail the job for real if anything did.
+          if [[ "${{ steps.bench_all.outcome }}" != "success" ]]; then
+            echo "bench-all reported a failure — see Performance Health above and bench-all.log." >&2
+            exit 1
+          fi
+
+      - name: Upload bench-all log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: performance-log-${{ github.run_id }}
+          path: bench-all.log
+          retention-days: 30
+          if-no-files-found: ignore
+
+      - name: Upload benchmark directory artifact
+        if: always() && env.OUT_DIR != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: performance-benchmarks-${{ github.run_id }}
+          path: ${{ env.OUT_DIR }}
+          retention-days: 90
+          if-no-files-found: warn
