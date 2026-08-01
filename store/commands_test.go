@@ -10,6 +10,7 @@ import (
 	"github.com/priyanshu-s-rana/kv_store/constants"
 	"github.com/priyanshu-s-rana/kv_store/data_type/heap"
 	"github.com/priyanshu-s-rana/kv_store/lru"
+	"github.com/priyanshu-s-rana/kv_store/utils"
 )
 
 // newTestStore builds a Store without starting eventLoop/eviction goroutines,
@@ -19,14 +20,23 @@ func newTestStore() *Store {
 	return &Store{
 		data: make(map[string]*entry),
 		ttls: heap.New[ttlItem](func(a, b ttlItem) bool {
-			return a.expiresAt.Before(b.expiresAt)
+			return a.expiresAt < b.expiresAt
 		}),
 		pubsub:        make(map[string][]chan []byte),
 		lru:           lru.New(),
 		memoryProfile: NewMemProfile(0, metrics),
-		pubSubStats:   &pubSubStats{metrics: metrics},
 		metrics:       metrics,
 	}
+}
+
+// subscribeTopic is a small test helper mirroring what server.go's
+// registerSubscription does for a single topic: create the channel, hand it
+// to the (now-unexported, single-threaded-event-loop-only) subscribe method,
+// and return it so the test can read from / unsubscribe it directly.
+func subscribeTopic(s *Store, topic string) chan []byte {
+	ch := make(chan []byte, 16)
+	s.subscribe(map[string]chan []byte{topic: ch})
+	return ch
 }
 
 func assertValue(t *testing.T, got Response, want string) {
@@ -71,7 +81,7 @@ func TestGetExpiredIsLazilyDeleted(t *testing.T) {
 	s := newTestStore()
 	s.data["foo"] = &entry{
 		value:  []byte("bar"),
-		expiry: time.Now().Add(-1 * time.Second), // already expired
+		expiry: utils.AbsoluteExpiry(-1), // already expired
 	}
 	assertValue(t, s.get([]string{"foo"}), respNil)
 	if _, exists := s.data["foo"]; exists {
@@ -116,7 +126,7 @@ func TestSetBasic(t *testing.T) {
 	if string(e.value) != "v" {
 		t.Errorf("value = %q, want %q", e.value, "v")
 	}
-	if !e.expiry.IsZero() {
+	if e.expiry != 0 {
 		t.Errorf("expiry should be zero for SET without EX, got %v", e.expiry)
 	}
 }
@@ -162,15 +172,20 @@ func TestSetXXKeyExists(t *testing.T) {
 	}
 }
 
-func TestSetEX(t *testing.T) {
+// setWithModifiers now only understands the *normalized* PXAT form (an
+// absolute-ms deadline) — EX -> PXAT conversion happens in normalizeCommand,
+// upstream of this handler, so calling set() directly (bypassing the event
+// loop, as these unit tests do) must already pass PXAT with an absolute
+// value, exactly like a real EX call would look after normalization.
+func TestSetPXAT(t *testing.T) {
 	s := newTestStore()
-	assertValue(t, s.set([]string{"k", "v", constants.EX, "10"}), respSimple(constants.OK))
+	assertValue(t, s.set([]string{"k", "v", constants.PXAT, utils.AbsoluteExpiryInString(10)}), respSimple(constants.OK))
 
 	e := s.data["k"]
-	if e.expiry.IsZero() {
+	if e.expiry == 0 {
 		t.Fatalf("expiry not set")
 	}
-	d := time.Until(e.expiry)
+	d := time.Duration(e.expiry-utils.AbsoluteTimeNow()) * time.Millisecond
 	if d < 9*time.Second || d > 11*time.Second {
 		t.Errorf("expiry off, expected ~10s, got %v", d)
 	}
@@ -179,17 +194,24 @@ func TestSetEX(t *testing.T) {
 	}
 }
 
-func TestSetEXMissingSeconds(t *testing.T) {
+func TestSetPXATMissingValue(t *testing.T) {
 	s := newTestStore()
-	assertValue(t, s.set([]string{"k", "v", constants.EX}), respError(constants.INV_EXPIRY))
+	assertValue(t, s.set([]string{"k", "v", constants.PXAT}), respError(constants.INV_EXPIRY))
 }
 
-func TestSetEXInvalidSeconds(t *testing.T) {
+func TestSetPXATInvalid(t *testing.T) {
 	s := newTestStore()
-	assertValue(t, s.set([]string{"k", "v", constants.EX, "abc"}), respError(constants.INV_EXPIRY))
+	assertValue(t, s.set([]string{"k", "v", constants.PXAT, "abc"}), respError(constants.INV_EXPIRY))
+}
 
-	s2 := newTestStore()
-	assertValue(t, s2.set([]string{"k", "v", constants.EX, "-5"}), respError(constants.INV_EXPIRY))
+// A well-formed PXAT deadline that's already in the past gets a distinct
+// error from a malformed one — AOF replay relies on being able to tell
+// "this value doesn't parse" (real corruption, should abort) apart from
+// "this deadline has simply elapsed since it was logged" (expected, should
+// be converted into a DEL instead — see persistence.handleExpiredKeyReplayError).
+func TestSetPXATAlreadyExpired(t *testing.T) {
+	s := newTestStore()
+	assertValue(t, s.set([]string{"k", "v", constants.PXAT, utils.AbsoluteExpiryInString(-5)}), respError(constants.ALRDY_EXPIRED))
 }
 
 func TestSetNXFailureNoMemoryCharge(t *testing.T) {
@@ -255,7 +277,7 @@ func TestDelPublishesLockReleased(t *testing.T) {
 	s := newTestStore()
 	s.data["mykey"] = &entry{value: []byte("v")}
 
-	ch := s.Subscribe("lock-released:mykey")
+	ch := subscribeTopic(s, "lock-released:mykey")
 
 	assertValue(t, s.del([]string{"mykey"}), respInt(constants.ONE))
 
@@ -271,7 +293,7 @@ func TestDelPublishesLockReleased(t *testing.T) {
 
 func TestDelMissingDoesNotPublish(t *testing.T) {
 	s := newTestStore()
-	ch := s.Subscribe("lock-released:nope")
+	ch := subscribeTopic(s, "lock-released:nope")
 
 	assertValue(t, s.del([]string{"nope"}), respInt(constants.ZERO))
 
@@ -295,19 +317,26 @@ func TestDelWrongArgs(t *testing.T) {
 	assertValue(t, resp, want)
 }
 
-// ---- EXPIRE ----
+// ---- PEXPIREAT (EXPIRE, normalized) ----
+//
+// The client-facing EXPIRE command is rewritten to PEXPIREAT with an
+// absolute-ms deadline by normalizeCommand before dispatch (see
+// store/helper.go and store/store_test.go's TestEventLoopDispatchesExpireAndTTL
+// for that end-to-end path). These tests exercise the handler itself
+// directly, post-normalization, so they pass an absolute deadline rather
+// than the relative seconds a real client would send.
 
 func TestExpireKeyMissing(t *testing.T) {
 	s := newTestStore()
-	assertValue(t, s.expire([]string{"missing", "10"}), respInt(constants.ZERO))
+	assertValue(t, s.pexpireAt([]string{"missing", utils.AbsoluteExpiryInString(10)}), respInt(constants.ZERO))
 }
 
 func TestExpireSetsTTL(t *testing.T) {
 	s := newTestStore()
 	s.data["k"] = &entry{value: []byte("v")}
-	assertValue(t, s.expire([]string{"k", "30"}), respInt(constants.ONE))
+	assertValue(t, s.pexpireAt([]string{"k", utils.AbsoluteExpiryInString(30)}), respInt(constants.ONE))
 
-	d := time.Until(s.data["k"].expiry)
+	d := time.Duration(s.data["k"].expiry-utils.AbsoluteTimeNow()) * time.Millisecond
 	if d < 29*time.Second || d > 31*time.Second {
 		t.Errorf("expiry off, got %v", d)
 	}
@@ -321,7 +350,7 @@ func TestExpireChargesMemory(t *testing.T) {
 	s.data["k"] = &entry{value: []byte("v")}
 	before := s.memoryProfile.ttlBytes
 
-	s.expire([]string{"k", "30"})
+	s.pexpireAt([]string{"k", utils.AbsoluteExpiryInString(30)})
 
 	if s.memoryProfile.ttlBytes <= before {
 		t.Errorf("ttlBytes = %d, want > %d after EXPIRE", s.memoryProfile.ttlBytes, before)
@@ -331,13 +360,13 @@ func TestExpireChargesMemory(t *testing.T) {
 func TestExpireInvalidSeconds(t *testing.T) {
 	s := newTestStore()
 	s.data["k"] = &entry{value: []byte("v")}
-	assertValue(t, s.expire([]string{"k", "abc"}), respError(constants.INV_EXPIRY))
-	assertValue(t, s.expire([]string{"k", "-1"}), respError(constants.INV_EXPIRY))
+	assertValue(t, s.pexpireAt([]string{"k", "abc"}), respError(constants.INV_EXPIRY))
+	assertValue(t, s.pexpireAt([]string{"k", "-1"}), respError(constants.INV_EXPIRY))
 }
 
 func TestExpireWrongArgs(t *testing.T) {
 	s := newTestStore()
-	resp := s.expire([]string{"k"})
+	resp := s.pexpireAt([]string{"k"})
 	want := respError(fmt.Sprintf(constants.WRONG_NUM_ARGS, "EXPIRE"))
 	assertValue(t, resp, want)
 }
@@ -357,7 +386,7 @@ func TestTTLKeyNoExpiry(t *testing.T) {
 
 func TestTTLKeyWithExpiry(t *testing.T) {
 	s := newTestStore()
-	s.data["k"] = &entry{value: []byte("v"), expiry: time.Now().Add(20 * time.Second)}
+	s.data["k"] = &entry{value: []byte("v"), expiry: utils.AbsoluteExpiry(20)}
 	resp := s.ttl([]string{"k"})
 
 	// Should be a positive integer near 20
@@ -373,7 +402,7 @@ func TestTTLKeyWithExpiry(t *testing.T) {
 
 func TestTTLExpiredKey(t *testing.T) {
 	s := newTestStore()
-	s.data["k"] = &entry{value: []byte("v"), expiry: time.Now().Add(-1 * time.Second)}
+	s.data["k"] = &entry{value: []byte("v"), expiry: utils.AbsoluteExpiry(-1)}
 	assertValue(t, s.ttl([]string{"k"}), respInt(constants.TTL_KEY_NOT_EXIST))
 }
 
@@ -388,7 +417,7 @@ func TestTTLWrongArgs(t *testing.T) {
 
 func TestSubscribeAndPublish(t *testing.T) {
 	s := newTestStore()
-	ch := s.Subscribe("news")
+	ch := subscribeTopic(s, "news")
 
 	resp := s.publish([]string{"news", "hello"})
 	assertValue(t, resp, ":1\r\n")
@@ -411,8 +440,8 @@ func TestPublishNoSubscribers(t *testing.T) {
 
 func TestPublishMultipleSubscribers(t *testing.T) {
 	s := newTestStore()
-	ch1 := s.Subscribe("topic")
-	ch2 := s.Subscribe("topic")
+	ch1 := subscribeTopic(s, "topic")
+	ch2 := subscribeTopic(s, "topic")
 
 	resp := s.publish([]string{"topic", "broadcast"})
 	assertValue(t, resp, ":2\r\n")
@@ -431,7 +460,7 @@ func TestPublishMultipleSubscribers(t *testing.T) {
 
 func TestPublishDropsOnFullBuffer(t *testing.T) {
 	s := newTestStore()
-	ch := s.Subscribe("t")
+	ch := subscribeTopic(s, "t")
 
 	// Fill the buffered chan (capacity 16)
 	for i := 0; i < 16; i++ {
@@ -446,8 +475,8 @@ func TestPublishDropsOnFullBuffer(t *testing.T) {
 
 func TestUnsubscribe(t *testing.T) {
 	s := newTestStore()
-	ch := s.Subscribe("t")
-	s.Unsubscribe("t", ch)
+	ch := subscribeTopic(s, "t")
+	s.unsubscribe(map[string]chan []byte{"t": ch})
 
 	resp := s.publish([]string{"t", "msg"})
 	assertValue(t, resp, ":0\r\n")
@@ -461,67 +490,72 @@ func TestPublishWrongArgs(t *testing.T) {
 }
 
 // ---- PUBSUB STATS ----
+//
+// Active topic/subscriber counts moved from a separate pubSubStats struct
+// into MemoryProfile (plain int64 fields, no atomics needed — subscribe/
+// unsubscribe now only ever run inside the single-threaded event loop, so
+// there's no concurrent access to guard against here anymore).
 
 func TestSubscribeIncrementsActiveTopicsAndSubscribers(t *testing.T) {
 	s := newTestStore()
-	ch := s.Subscribe("sports")
-	defer s.Unsubscribe("sports", ch)
+	ch := subscribeTopic(s, "sports")
+	defer s.unsubscribe(map[string]chan []byte{"sports": ch})
 
-	if got := s.pubSubStats.activeTopics.Load(); got != 1 {
+	if got := s.memoryProfile.activeTopics; got != 1 {
 		t.Errorf("ActiveTopics = %d, want 1", got)
 	}
-	if got := s.pubSubStats.activeSubscribers.Load(); got != 1 {
+	if got := s.memoryProfile.activeSubscribers; got != 1 {
 		t.Errorf("ActiveSubscribers = %d, want 1", got)
 	}
 }
 
 func TestSubscribeSecondSubscriberSameTopicOnlyOneActiveTopic(t *testing.T) {
 	s := newTestStore()
-	ch1 := s.Subscribe("news")
-	ch2 := s.Subscribe("news")
-	defer s.Unsubscribe("news", ch1)
-	defer s.Unsubscribe("news", ch2)
+	ch1 := subscribeTopic(s, "news")
+	ch2 := subscribeTopic(s, "news")
+	defer s.unsubscribe(map[string]chan []byte{"news": ch1})
+	defer s.unsubscribe(map[string]chan []byte{"news": ch2})
 
-	if got := s.pubSubStats.activeTopics.Load(); got != 1 {
+	if got := s.memoryProfile.activeTopics; got != 1 {
 		t.Errorf("ActiveTopics = %d, want 1 (same topic)", got)
 	}
-	if got := s.pubSubStats.activeSubscribers.Load(); got != 2 {
+	if got := s.memoryProfile.activeSubscribers; got != 2 {
 		t.Errorf("ActiveSubscribers = %d, want 2", got)
 	}
 }
 
 func TestSubscribeTwoDistinctTopicsCountsBoth(t *testing.T) {
 	s := newTestStore()
-	ch1 := s.Subscribe("sports")
-	ch2 := s.Subscribe("news")
-	defer s.Unsubscribe("sports", ch1)
-	defer s.Unsubscribe("news", ch2)
+	ch1 := subscribeTopic(s, "sports")
+	ch2 := subscribeTopic(s, "news")
+	defer s.unsubscribe(map[string]chan []byte{"sports": ch1})
+	defer s.unsubscribe(map[string]chan []byte{"news": ch2})
 
-	if got := s.pubSubStats.activeTopics.Load(); got != 2 {
+	if got := s.memoryProfile.activeTopics; got != 2 {
 		t.Errorf("ActiveTopics = %d, want 2", got)
 	}
-	if got := s.pubSubStats.activeSubscribers.Load(); got != 2 {
+	if got := s.memoryProfile.activeSubscribers; got != 2 {
 		t.Errorf("ActiveSubscribers = %d, want 2", got)
 	}
 }
 
 func TestUnsubscribeDecrementsStats(t *testing.T) {
 	s := newTestStore()
-	ch := s.Subscribe("sports")
-	s.Unsubscribe("sports", ch)
+	ch := subscribeTopic(s, "sports")
+	s.unsubscribe(map[string]chan []byte{"sports": ch})
 
-	if got := s.pubSubStats.activeTopics.Load(); got != 0 {
+	if got := s.memoryProfile.activeTopics; got != 0 {
 		t.Errorf("ActiveTopics = %d, want 0 after unsubscribe", got)
 	}
-	if got := s.pubSubStats.activeSubscribers.Load(); got != 0 {
+	if got := s.memoryProfile.activeSubscribers; got != 0 {
 		t.Errorf("ActiveSubscribers = %d, want 0 after unsubscribe", got)
 	}
 }
 
 func TestPublishIncrementsMessagesPublished(t *testing.T) {
 	s := newTestStore()
-	ch := s.Subscribe("events")
-	defer s.Unsubscribe("events", ch)
+	ch := subscribeTopic(s, "events")
+	defer s.unsubscribe(map[string]chan []byte{"events": ch})
 
 	s.publish([]string{"events", "hello"})
 
@@ -545,11 +579,11 @@ func TestPublishNoSubscribersDoesNotIncrementMessagesPublished(t *testing.T) {
 
 func TestEvictRemovesExpired(t *testing.T) {
 	s := newTestStore()
-	now := time.Now()
+	now := utils.AbsoluteTimeNow()
 
-	s.data["expired1"] = &entry{value: []byte("a"), expiry: now.Add(-2 * time.Second)}
-	s.data["expired2"] = &entry{value: []byte("b"), expiry: now.Add(-1 * time.Second)}
-	s.data["alive"] = &entry{value: []byte("c"), expiry: now.Add(10 * time.Second)}
+	s.data["expired1"] = &entry{value: []byte("a"), expiry: now - 2000}
+	s.data["expired2"] = &entry{value: []byte("b"), expiry: now - 1000}
+	s.data["alive"] = &entry{value: []byte("c"), expiry: now + 10000}
 
 	s.ttls.Push(ttlItem{key: "expired1", expiresAt: s.data["expired1"].expiry})
 	s.ttls.Push(ttlItem{key: "expired2", expiresAt: s.data["expired2"].expiry})
@@ -578,12 +612,12 @@ func TestEvictEmptyHeap(t *testing.T) {
 
 func TestEvictPublishesLockReleased(t *testing.T) {
 	s := newTestStore()
-	now := time.Now()
+	now := utils.AbsoluteTimeNow()
 
-	s.data["expired"] = &entry{value: []byte("a"), expiry: now.Add(-1 * time.Second)}
+	s.data["expired"] = &entry{value: []byte("a"), expiry: now - 1000}
 	s.ttls.Push(ttlItem{key: "expired", expiresAt: s.data["expired"].expiry})
 
-	ch := s.Subscribe("lock-released:expired")
+	ch := subscribeTopic(s, "lock-released:expired")
 	s.evict(nil)
 
 	select {
@@ -601,10 +635,10 @@ func TestEvictPublishesLockReleased(t *testing.T) {
 // current expiry has been extended.
 func TestEvictSkipsStaleHeapEntry(t *testing.T) {
 	s := newTestStore()
-	now := time.Now()
+	now := utils.AbsoluteTimeNow()
 
-	staleExpiry := now.Add(-1 * time.Second)   // old, already past
-	currentExpiry := now.Add(10 * time.Second) // refreshed, still alive
+	staleExpiry := now - 1000    // old, already past
+	currentExpiry := now + 10000 // refreshed, still alive
 
 	s.data["k"] = &entry{value: []byte("v"), expiry: currentExpiry}
 	// Heap has the stale entry (simulating an earlier EX that got overwritten)
@@ -619,10 +653,10 @@ func TestEvictSkipsStaleHeapEntry(t *testing.T) {
 
 func TestEvictRemovesHeapEntryEvenIfKeyAlreadyDeleted(t *testing.T) {
 	s := newTestStore()
-	now := time.Now()
+	now := utils.AbsoluteTimeNow()
 
 	// Heap has an entry but the data was already removed (e.g. via DEL)
-	s.ttls.Push(ttlItem{key: "ghost", expiresAt: now.Add(-1 * time.Second)})
+	s.ttls.Push(ttlItem{key: "ghost", expiresAt: now - 1000})
 
 	s.evict(nil)
 
@@ -633,9 +667,9 @@ func TestEvictRemovesHeapEntryEvenIfKeyAlreadyDeleted(t *testing.T) {
 
 func TestEvictStopsAtFirstAlive(t *testing.T) {
 	s := newTestStore()
-	now := time.Now()
+	now := utils.AbsoluteTimeNow()
 
-	s.data["future"] = &entry{value: []byte("a"), expiry: now.Add(5 * time.Second)}
+	s.data["future"] = &entry{value: []byte("a"), expiry: now + 5000}
 	s.ttls.Push(ttlItem{key: "future", expiresAt: s.data["future"].expiry})
 
 	s.evict(nil)
@@ -650,10 +684,10 @@ func TestEvictStopsAtFirstAlive(t *testing.T) {
 
 func TestEvictDecrementsttlBytes(t *testing.T) {
 	s := newTestStore()
-	now := time.Now()
+	now := utils.AbsoluteTimeNow()
 
-	s.data["k"] = &entry{value: []byte("v"), expiry: now.Add(-1 * time.Second)}
-	item := ttlItem{key: "k", expiresAt: now.Add(-1 * time.Second)}
+	s.data["k"] = &entry{value: []byte("v"), expiry: now - 1000}
+	item := ttlItem{key: "k", expiresAt: now - 1000}
 	s.ttls.Push(item)
 	s.memoryProfile.recordTTLSize(&item)
 
@@ -771,7 +805,7 @@ func TestKeysWrongArgs(t *testing.T) {
 func TestFlushAll(t *testing.T) {
 	s := newTestStore()
 	s.data["k1"] = &entry{value: []byte("v1")}
-	s.data["k2"] = &entry{value: []byte("v2"), expiry: time.Now().Add(time.Hour)}
+	s.data["k2"] = &entry{value: []byte("v2"), expiry: utils.AbsoluteExpiry(3600)}
 	s.ttls.Push(ttlItem{key: "k2", expiresAt: s.data["k2"].expiry})
 
 	assertValue(t, s.flushAll(nil), respSimple(constants.OK))
@@ -835,7 +869,7 @@ func TestMemoryProfileSetWithoutEXNoTTLCharge(t *testing.T) {
 
 func TestMemoryProfileSetWithEXChargesTTL(t *testing.T) {
 	s := newTestStore()
-	s.set([]string{"k", "v", constants.EX, "10"})
+	s.set([]string{"k", "v", constants.PXAT, utils.AbsoluteExpiryInString(10)})
 
 	if s.memoryProfile.ttlBytes <= 0 {
 		t.Errorf("ttlBytes = %d, want > 0 for SET with EX", s.memoryProfile.ttlBytes)
@@ -900,10 +934,10 @@ func TestMemoryUnlimitedWhenZero(t *testing.T) {
 
 func TestMemoryProfileSubscribeTopicChargedOnce(t *testing.T) {
 	s := newTestStore()
-	s.Subscribe("news")
+	subscribeTopic(s, "news")
 	afterFirst := s.memoryProfile.pubsubBytes
 
-	s.Subscribe("news")
+	subscribeTopic(s, "news")
 	diff := s.memoryProfile.pubsubBytes - afterFirst
 
 	if diff != constants.BYTE_CHANNEL_OVERHEAD {
@@ -913,8 +947,8 @@ func TestMemoryProfileSubscribeTopicChargedOnce(t *testing.T) {
 
 func TestMemoryProfileUnsubscribeFreesTopicOnLastSubscriber(t *testing.T) {
 	s := newTestStore()
-	ch := s.Subscribe("news")
-	s.Unsubscribe("news", ch)
+	ch := subscribeTopic(s, "news")
+	s.unsubscribe(map[string]chan []byte{"news": ch})
 
 	if s.memoryProfile.pubsubBytes != 0 {
 		t.Errorf("pubsubBytes = %d, want 0 after last subscriber leaves", s.memoryProfile.pubsubBytes)
@@ -923,11 +957,11 @@ func TestMemoryProfileUnsubscribeFreesTopicOnLastSubscriber(t *testing.T) {
 
 func TestMemoryProfileUnsubscribePartialKeepsTopic(t *testing.T) {
 	s := newTestStore()
-	ch1 := s.Subscribe("news")
-	ch2 := s.Subscribe("news")
+	ch1 := subscribeTopic(s, "news")
+	ch2 := subscribeTopic(s, "news")
 	afterBoth := s.memoryProfile.pubsubBytes
 
-	s.Unsubscribe("news", ch1)
+	s.unsubscribe(map[string]chan []byte{"news": ch1})
 
 	// topic overhead should still be charged — ch2 is still subscribed
 	expected := afterBoth - constants.BYTE_CHANNEL_OVERHEAD
@@ -1070,7 +1104,7 @@ func TestMemoryStatsDecreasesAfterDel(t *testing.T) {
 
 func TestMemoryStatsTTLSizeAfterEX(t *testing.T) {
 	s := newTestStore()
-	s.set([]string{"mykey", "v", constants.EX, "10"}) // key = 5 B
+	s.set([]string{"mykey", "v", constants.PXAT, utils.AbsoluteExpiryInString(10)}) // key = 5 B
 
 	expTTL := fmt.Sprintf("%d B", constants.TTL_ITEM_OVERHEAD+int64(len("mykey")))
 
@@ -1080,7 +1114,7 @@ func TestMemoryStatsTTLSizeAfterEX(t *testing.T) {
 
 func TestMemoryStatsPubSubSizeAfterSubscribe(t *testing.T) {
 	s := newTestStore()
-	s.Subscribe("news") // topic = 4 B
+	subscribeTopic(s, "news") // topic = 4 B
 
 	expPubSub := fmt.Sprintf("%d B",
 		constants.STRING_OVERHEAD+int64(len("news"))+constants.BYTE_CHANNEL_OVERHEAD)
@@ -1091,8 +1125,8 @@ func TestMemoryStatsPubSubSizeAfterSubscribe(t *testing.T) {
 
 func TestMemoryStatsPubSubSizeDecreasesAfterUnsubscribe(t *testing.T) {
 	s := newTestStore()
-	ch := s.Subscribe("news")
-	s.Unsubscribe("news", ch)
+	ch := subscribeTopic(s, "news")
+	s.unsubscribe(map[string]chan []byte{"news": ch})
 
 	body := statsBody(t, s)
 	assertStat(t, body, "pubsubSize", "0 B")
@@ -1171,7 +1205,7 @@ func TestMemoryProfileGetStatsPeakBytesIsRetained(t *testing.T) {
 func TestSnapshotCopiesData(t *testing.T) {
 	s := newTestStore()
 
-	expiry := time.Now().Add(time.Hour)
+	expiry := utils.AbsoluteExpiry(3600)
 	s.data["k1"] = &entry{value: []byte("v1")}
 	s.data["k2"] = &entry{value: []byte("v2"), expiry: expiry}
 
@@ -1185,13 +1219,13 @@ func TestSnapshotCopiesData(t *testing.T) {
 	if string(data["k1"].Value) != "v1" {
 		t.Errorf("k1 value = %q, want %q", data["k1"].Value, "v1")
 	}
-	if !data["k1"].Expiry.IsZero() {
+	if data["k1"].Expiry != 0 {
 		t.Errorf("k1 expiry = %v, want zero", data["k1"].Expiry)
 	}
 	if string(data["k2"].Value) != "v2" {
 		t.Errorf("k2 value = %q, want %q", data["k2"].Value, "v2")
 	}
-	if !data["k2"].Expiry.Equal(expiry) {
+	if data["k2"].Expiry != expiry {
 		t.Errorf("k2 expiry = %v, want %v", data["k2"].Expiry, expiry)
 	}
 }
@@ -1345,7 +1379,7 @@ func TestMGetMissingKeyReturnsNil(t *testing.T) {
 
 func TestMGetExpiredKeyReturnsNil(t *testing.T) {
 	s := newTestStore()
-	s.data["k"] = &entry{value: []byte("v"), expiry: time.Now().Add(-1 * time.Second)}
+	s.data["k"] = &entry{value: []byte("v"), expiry: utils.AbsoluteExpiry(-1)}
 	resp := s.mget([]string{"k"})
 	if !bytes.Contains(resp.Value, []byte(constants.NIL_DISPLAY)) {
 		t.Errorf("mget should return nil for expired key: %q", resp.Value)
@@ -1406,16 +1440,16 @@ func TestIncrNonIntegerError(t *testing.T) {
 
 func TestIncrExpiredKeyInitialisesToOne(t *testing.T) {
 	s := newTestStore()
-	s.data["k"] = &entry{value: []byte("5"), expiry: time.Now().Add(-1 * time.Second)}
+	s.data["k"] = &entry{value: []byte("5"), expiry: utils.AbsoluteExpiry(-1)}
 	assertValue(t, s.incr([]string{"k"}), respInt(1))
 }
 
 func TestIncrPreservesExpiry(t *testing.T) {
 	s := newTestStore()
-	expiry := time.Now().Add(10 * time.Second)
+	expiry := utils.AbsoluteExpiry(10)
 	s.data["k"] = &entry{value: []byte("1"), expiry: expiry}
 	s.incr([]string{"k"})
-	if !s.data["k"].expiry.Equal(expiry) {
+	if s.data["k"].expiry != expiry {
 		t.Errorf("expiry changed after INCR")
 	}
 }
@@ -1463,16 +1497,16 @@ func TestDecrNonIntegerError(t *testing.T) {
 
 func TestDecrExpiredKeyInitialisesToMinusOne(t *testing.T) {
 	s := newTestStore()
-	s.data["k"] = &entry{value: []byte("5"), expiry: time.Now().Add(-1 * time.Second)}
+	s.data["k"] = &entry{value: []byte("5"), expiry: utils.AbsoluteExpiry(-1)}
 	assertValue(t, s.decr([]string{"k"}), respInt(-1))
 }
 
 func TestDecrPreservesExpiry(t *testing.T) {
 	s := newTestStore()
-	expiry := time.Now().Add(10 * time.Second)
+	expiry := utils.AbsoluteExpiry(10)
 	s.data["k"] = &entry{value: []byte("1"), expiry: expiry}
 	s.decr([]string{"k"})
-	if !s.data["k"].expiry.Equal(expiry) {
+	if s.data["k"].expiry != expiry {
 		t.Errorf("expiry changed after DECR")
 	}
 }

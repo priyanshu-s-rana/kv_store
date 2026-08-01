@@ -1,0 +1,17 @@
+services:
+  kv-server-bench:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    image: kv_store-bench
+    container_name: kv-server-bench
+    ports:
+      - "5041:5040"
+      - "9091:9090"
+    environment:
+      APP_ENV: prod
+    volumes:
+      - kv-bench-data:/data
+
+volumes:
+  kv-bench-data:

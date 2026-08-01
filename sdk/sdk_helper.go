@@ -51,9 +51,18 @@ func buildSetArgs(args []string, options ...SetOption) []string {
 	return args
 }
 
+func validateArgs(msg ...string) error {
+	for _, arg := range msg {
+		if len(arg) > constants.MaxBulkLen {
+			return fmt.Errorf("[KVStore Client] argument exceeds maximum bulk length (%d bytes): got %d bytes", constants.MaxBulkLen, len(arg))
+		}
+	}
+	return nil
+}
+
 // sendCommand writes a RESP array command and reads the server's response.
 func (client *KVStoreClient) sendCommand(msg ...string) (string, error) {
-
+	validateArgs(msg...)
 	_, err := client.conn.Write(parser.Array(msg...))
 	if err != nil {
 		return "", fmt.Errorf("[KVStore Client] error writing to server: %v", err)

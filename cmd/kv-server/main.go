@@ -33,16 +33,14 @@ func startMetricsServer(addr string, m *metrics.Manager) {
 
 // gracefulShutdown blocks until SIGINT or SIGTERM is received, then cancels the
 // context, flushes a final snapshot to disk, and exits cleanly.
-func gracefulShutdown(persist *persistence.Persistence) {
+func gracefulShutdown(persist *persistence.Persistence, server *server.Server) {
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
 	log.Println("[main] shutting down gracefully...")
 
 	persist.Close()
-
-	log.Println("[main] shutdown complete")
-	os.Exit(0)
+	server.ShutDown()
 }
 
 func main() {
@@ -69,6 +67,8 @@ func main() {
 	go startMetricsServer(metricsAddr, metrics)
 
 	cmdChan := make(chan models.Command)
+	subscribeChan := make(chan models.SubscribeReq)
+	unsubscribeChan := make(chan models.UnsubscribeReq)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	persist, err := persistence.New(
@@ -95,22 +95,29 @@ func main() {
 		log.Fatalf("[main] error initializing persistence: %v.", err)
 	}
 
-	store := store.New(memorySize, cmdChan, persist, metrics.Store)
+	store := store.New(memorySize, cmdChan, subscribeChan, unsubscribeChan, persist, metrics.Store)
 	store.Start()
 
 	if err := persist.Recovery(); err != nil {
-		log.Printf("[main] warning: failed to recover persistant data from disk: %v", err)
+		log.Printf("[main]  : failed to recover persistant data from disk: %v", err)
 	}
 
 	if err := persist.Start(); err != nil {
 		log.Printf("[main] warning: failed to start persistence for the store: %v", err)
 	}
 
-	go gracefulShutdown(persist)
+	server := server.New(addr, cmdChan, subscribeChan, unsubscribeChan, metrics.Server)
 
-	server := server.New(addr, cmdChan, store, metrics.Server)
 	log.Printf("[main] KV Store starting server on port %s", port)
 	if err = server.Start(); err != nil {
 		log.Fatalf("[main] server error: %v", err)
 	}
+
+	go gracefulShutdown(persist, server)
+
+	if err = server.Serve(); err != nil {
+		log.Fatalf("[main] server error: %v", err)
+	}
+
+	log.Println("[main] shutdown complete")
 }

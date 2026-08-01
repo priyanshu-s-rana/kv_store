@@ -10,6 +10,7 @@ import (
 	"github.com/priyanshu-s-rana/kv_store/data_type/heap"
 	"github.com/priyanshu-s-rana/kv_store/lru"
 	"github.com/priyanshu-s-rana/kv_store/parser"
+	"github.com/priyanshu-s-rana/kv_store/utils"
 )
 
 // PING command returns PONG, used to check server liveness.
@@ -81,10 +82,10 @@ func (s *Store) del(args []string) Response {
 	return Response{Value: parser.Integer(constants.ONE)}
 }
 
-// EXPIRE command sets a ttl on key
+// PEXPIREAT command sets a ttl on key
 // @returns 0: if the key does not exist,
 // @returns 1: if the ttl is set successfully.
-func (s *Store) expire(args []string) Response {
+func (s *Store) pexpireAt(args []string) Response {
 	if len(args) < 2 {
 		return Response{Value: parser.Error(fmt.Sprintf(constants.WRONG_NUM_ARGS, constants.Expire))}
 	}
@@ -95,12 +96,16 @@ func (s *Store) expire(args []string) Response {
 		return Response{Value: parser.Integer(constants.ZERO)}
 	}
 
-	secs, err := strconv.Atoi(args[1])
-	if err != nil || secs < 0 {
+	expiry, err := strconv.ParseInt(args[1], 10, 64)
+	if err != nil || expiry < 0 {
 		return Response{Value: parser.Error(constants.INV_EXPIRY)}
 	}
 
-	e.expiry = time.Now().Add(time.Duration(secs) * time.Second)
+	if expiry <= utils.AbsoluteTimeNow() {
+		return Response{Value: parser.Error(constants.ALRDY_EXPIRED), Err: constants.ALRDY_EXPIRED_ERR}
+	}
+
+	e.expiry = expiry
 	item := ttlItem{key: key, expiresAt: e.expiry}
 	s.ttls.Push(item)
 	s.memoryProfile.recordTTLSize(&item)
@@ -128,51 +133,47 @@ func (s *Store) ttl(args []string) Response {
 		return Response{Value: parser.Integer(constants.TTL_KEY_NO_EXPIRY)}
 	}
 
-	ttl := time.Until(e.expiry).Seconds()
+	ttl := utils.AbsoluteTimeInSeconds(e.expiry - utils.AbsoluteTimeNow())
 	return Response{Value: parser.Integer(int(ttl))}
 }
 
 // SUBSCRIBE command allows clients to subscribe to a topic.
 // @returns a channel to which client can listen to.
-func (s *Store) Subscribe(topic string) chan []byte {
+func (s *Store) subscribe(subscribers map[string]chan []byte) chan []byte {
 	ch := make(chan []byte, 16)
 
-	s.mut.Lock()
-	isNewTopic := len(s.pubsub[topic]) == 0
-	s.pubsub[topic] = append(s.pubsub[topic], ch)
-	s.mut.Unlock()
+	for topic, ch := range subscribers {
+		isNewTopic := len(s.pubsub[topic]) == 0
+		s.pubsub[topic] = append(s.pubsub[topic], ch)
 
-	if isNewTopic {
-		s.memoryProfile.recordPubSubTopicSize(topic)
-		s.pubSubStats.incActiveTopics()
+		if isNewTopic {
+			s.memoryProfile.recordPubSubTopicSize(topic)
+		}
+		s.memoryProfile.recordPubSubSubscriber()
 	}
-	s.memoryProfile.recordPubSubSubscriber()
-	s.pubSubStats.incActiveSubscribers()
+
 	return ch
 }
 
 // Unsubscribe removes ch from the subscriber list for topic.
-func (s *Store) Unsubscribe(topic string, ch chan []byte) {
-	s.mut.Lock()
-
-	subs := s.pubsub[topic]
-	for i, subChan := range subs {
-		if subChan == ch {
-			s.pubsub[topic] = append(subs[:i], subs[i+1:]...)
-			break
+func (s *Store) unsubscribe(subscribedTopics map[string]chan []byte) {
+	for topic, ch := range subscribedTopics {
+		subs := s.pubsub[topic]
+		for i, subChan := range subs {
+			if subChan == ch {
+				s.pubsub[topic] = append(subs[:i], subs[i+1:]...)
+				break
+			}
 		}
+
+		isTopicEmpty := len(s.pubsub[topic]) == 0
+		close(ch)
+
+		if isTopicEmpty {
+			s.memoryProfile.recordPubSubTopicRemove(topic)
+		}
+		s.memoryProfile.recordPubSubSubscriberRemove()
 	}
-
-	isTopicEmpty := len(s.pubsub[topic]) == 0
-	s.mut.Unlock()
-
-	if isTopicEmpty {
-		s.memoryProfile.recordPubSubTopicRemove(topic)
-		s.pubSubStats.decActiveTopics()
-	}
-	s.memoryProfile.recordPubSubSubscriberRemove()
-	s.pubSubStats.decActiveSubscribers()
-
 }
 
 // PUBLISH command sends a message to all subscribers of the given topic.
@@ -187,10 +188,8 @@ func (s *Store) publish(args []string) Response {
 
 	topic, message := args[0], strings.Join(args[1:], " ")
 
-	s.mut.Lock()
 	subs := make([]chan []byte, len(s.pubsub[topic]))
 	copy(subs, s.pubsub[topic])
-	s.mut.Unlock()
 
 	delivered := 0
 	for _, subChan := range subs {
@@ -210,10 +209,10 @@ func (s *Store) evict(_ []string) Response {
 	start := time.Now()
 	defer func() { s.metrics.ObserveTTLExpiryDuration(time.Since(start)) }()
 
-	now := time.Now()
+	now := utils.AbsoluteTimeNow()
 	for s.ttls.Len() > 0 {
 		item, ok := s.ttls.Peek()
-		if !ok || item.expiresAt.After(now) {
+		if !ok || item.expiresAt > now {
 			break
 		}
 		if popped, ok := s.ttls.Pop(); ok {
@@ -252,7 +251,7 @@ func (s *Store) keys(args []string) Response {
 func (s *Store) flushAll(_ []string) Response {
 	clear(s.data)
 	s.ttls = heap.New[ttlItem](func(a, b ttlItem) bool {
-		return a.expiresAt.Before(b.expiresAt)
+		return a.expiresAt < b.expiresAt
 	})
 	s.lru = lru.New()
 	s.memoryProfile.resetAll()

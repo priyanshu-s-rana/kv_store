@@ -47,7 +47,9 @@ func newTestNode(t *testing.T, paths [2]string, snapPath string, policy string) 
 		t.Fatalf("persistence.New: %v", err)
 	}
 
-	st := store.New(0, cmdChan, persist, noopStoreMetrics{})
+	subscribeChan := make(chan store.SubscribeReq)
+	unsubscribeChan := make(chan store.UnsubscribeReq)
+	st := store.New(0, cmdChan, subscribeChan, unsubscribeChan, persist, noopStoreMetrics{})
 	st.Start()
 
 	return &testNode{t: t, ctx: ctx, cancel: cancel, cmdChan: cmdChan, persist: persist, store: st}

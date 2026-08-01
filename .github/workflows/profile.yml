@@ -1,0 +1,140 @@
+name: Manual Profiling
+
+# Diagnostic-only entry point: generates pprof profiles (cpu/heap/allocs/
+# block/mutex) from the same Go runtime benchmarks bench-runtime uses, via
+# `make bench-profile` (scripts/benchmark/runtime_benchmark.sh --profile).
+# Never runs on its own schedule or on PRs — instrumentation overhead
+# skews the very numbers bench-runtime/performance measure, so
+# profiling only happens when someone explicitly asks for it. See
+# benchmarks/README.md ("Profiling: bench-profile") and
+# docs/benchmarks/runtime.md ("Inspecting pprof profiles").
+
+on:
+  workflow_dispatch:
+    inputs:
+      name:
+        description: 'Run name (profiles land in benchmarks/<name>_<timestamp>/profile/)'
+        required: false
+        default: 'profile'
+      bench:
+        description: '-bench regex — which benchmark(s) to profile'
+        required: false
+        default: '.'
+      benchtime:
+        description: '-benchtime value, e.g. 3s or 200x (blank = go test default, ~1s/benchmark)'
+        required: false
+        default: ''
+
+jobs:
+  profile:
+    name: Generate pprof Profiles
+    runs-on: ubuntu-latest
+    # Generous relative to the default ~1s/benchmark run, since --benchtime
+    # is user-controlled via workflow_dispatch and could be set much higher
+    # — still far below GitHub's 360-minute default, so a genuine hang
+    # doesn't sit queued for hours.
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        id: setup-go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Record start time
+        run: echo "START_TIME=$(date +%s)" >> "$GITHUB_ENV"
+
+      # runtime_benchmark.sh honors a pre-set RUN_ID from the environment
+      # (see scripts/benchmark/runtime_benchmark.sh), so pinning it here
+      # means the profile output path is known ahead of time for the
+      # summary/upload steps below, without having to glob for it.
+      - name: Set run id
+        run: echo "RUN_ID=$(date +%Y-%m-%d_%H-%M-%S)" >> "$GITHUB_ENV"
+
+      - name: Generate profiles
+        id: profile
+        run: |
+          make bench-profile \
+            NAME="${{ inputs.name }}" \
+            BENCH="${{ inputs.bench }}" \
+            BENCHTIME="${{ inputs.benchtime }}"
+
+      - name: Write profiling summary
+        if: always()
+        run: |
+          status_icon() {
+            case "$1" in
+              success) echo "✅ Completed" ;;
+              failure) echo "❌ Failed" ;;
+              *) echo "⚠️ ${1:-unknown}" ;;
+            esac
+          }
+
+          end_time=$(date +%s)
+          elapsed=$(( end_time - START_TIME ))
+          profile_dir="benchmarks/${{ inputs.name }}_${RUN_ID}/profile"
+          doc_url="https://github.com/${{ github.repository }}/blob/${{ github.sha }}/docs/benchmarks/runtime.md"
+
+          {
+            echo "## Performance Health"
+            echo ""
+            echo "| Suite | Status |"
+            echo "|---|---|"
+            echo "| Profile Generation | $(status_icon "${{ steps.profile.outcome }}") |"
+            echo ""
+            echo "## Profile Summary"
+            echo ""
+            echo "| | |"
+            echo "|---|---|"
+            echo "| Repository | \`${{ github.repository }}\` |"
+            echo "| Branch | \`${{ github.ref_name }}\` |"
+            echo "| Commit | \`${{ github.sha }}\` |"
+            echo "| Execution Time | ${elapsed}s |"
+            echo ""
+            echo "### Profiles Generated"
+            echo ""
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [[ -d "$profile_dir" ]]; then
+            {
+              echo "| Package | cpu.pprof | heap.pprof | allocs.pprof | block.pprof | mutex.pprof |"
+              echo "|---|---|---|---|---|---|"
+            } >> "$GITHUB_STEP_SUMMARY"
+            for pkg_dir in "$profile_dir"/*/; do
+              [[ -d "$pkg_dir" ]] || continue
+              pkg="$(basename "$pkg_dir")"
+              row="| $pkg |"
+              for f in cpu heap allocs block mutex; do
+                if [[ -s "${pkg_dir}${f}.pprof" ]]; then
+                  row="$row ✅ |"
+                else
+                  row="$row — |"
+                fi
+              done
+              echo "$row" >> "$GITHUB_STEP_SUMMARY"
+            done
+          else
+            echo "_No profiles were generated — see job logs._" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+          {
+            echo ""
+            echo "See [docs/benchmarks/runtime.md](${doc_url}) for how to inspect these with \`go tool pprof\` — profile contents aren't rendered here, only what was generated."
+            echo ""
+            echo "### Artifact"
+            echo ""
+            echo "Download \`profile-${{ github.run_id }}\` from this run's **Artifacts** section (bottom of the run summary page) to inspect locally."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload profile artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: profile-${{ github.run_id }}
+          path: benchmarks/${{ inputs.name }}_${{ env.RUN_ID }}/profile/
+          retention-days: 30
+          if-no-files-found: warn

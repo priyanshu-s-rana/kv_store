@@ -30,10 +30,16 @@ func (fakePersistence) Rebaseline(map[string]store.SnapshotEntry) error { return
 func TestMain(m *testing.M) {
 	metricsManager := metrics.New()
 	cmdChan := make(chan store.Command)
-	st := store.New(0, cmdChan, fakePersistence{}, metricsManager.Store)
+	subscribeChan := make(chan store.SubscribeReq)
+	unsubscribeChan := make(chan store.UnsubscribeReq)
+	st := store.New(0, cmdChan, subscribeChan, unsubscribeChan, fakePersistence{}, metricsManager.Store)
 	st.Start()
-	srv := server.New(testAddr, cmdChan, st, metricsManager.Server)
-	go srv.Start()
+	srv := server.New(testAddr, cmdChan, subscribeChan, unsubscribeChan, metricsManager.Server)
+	if err := srv.Start(); err != nil {
+		fmt.Println("failed to start test server:", err)
+		os.Exit(1)
+	}
+	go srv.Serve()
 
 	// Wait until the server is ready.
 	for i := 0; i < 20; i++ {

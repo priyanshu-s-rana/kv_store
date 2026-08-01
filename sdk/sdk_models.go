@@ -27,8 +27,9 @@ func NewSubscription(address string) (*Subscription, error) {
 	}, nil
 }
 
-// Unsubscribe closes the server connection, which signals the server to clean up
-// the subscription and causes the background goroutine to exit.
+// Unsubscribe terminates this subscription by closing its dedicated
+// connection to the server. The server detects the disconnect and
+// automatically removes all subscriptions associated with this connection.
 func (subscriber *Subscription) Unsubscribe() {
 	subscriber.conn.Close()
 }

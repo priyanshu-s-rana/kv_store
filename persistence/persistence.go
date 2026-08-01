@@ -97,8 +97,7 @@ func (p *Persistence) LoadFromDisk() error {
 
 		args := []string{key, string(value.Value)}
 		if value.HasExpiry() {
-			remainingSecs := int(time.Until(value.Expiry).Seconds())
-			args = append(args, []string{"EX", strconv.Itoa(remainingSecs)}...)
+			args = append(args, constants.PXAT, strconv.FormatInt(value.Expiry, 10))
 		}
 
 		if err := sendCommandToEventLoop(p.cmdChan, constants.Set, args); err == nil {

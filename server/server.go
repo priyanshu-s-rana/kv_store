@@ -1,35 +1,41 @@
 package server
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"log"
 	"net"
+	"strconv"
+	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/priyanshu-s-rana/kv_store/constants"
 	"github.com/priyanshu-s-rana/kv_store/models"
 	"github.com/priyanshu-s-rana/kv_store/parser"
-	"github.com/priyanshu-s-rana/kv_store/store"
 )
 
 type Server struct {
 	addr              string
+	listener          net.Listener
 	cmdChan           chan<- models.Command
-	store             *store.Store
+	subscribeChan     chan<- models.SubscribeReq
+	unsubscribeChan   chan<- models.UnsubscribeReq
 	metrics           ServerMetrics
 	activeConnections atomic.Int64
+	wg                sync.WaitGroup
 }
 
 // New creates a Server bound to addr, wiring it to store's command channel.
 // @returns *Server: ready to accept connections via Start.
-func New(addr string, cmdChan chan<- models.Command, store *store.Store, metrics ServerMetrics) *Server {
+func New(addr string, cmdChan chan<- models.Command, subscribeChan chan<- models.SubscribeReq, unsubscribeChan chan<- models.UnsubscribeReq, metrics ServerMetrics) *Server {
 	return &Server{
-		addr:    addr,
-		cmdChan: cmdChan,
-		store:   store,
-		metrics: metrics,
+		addr:            addr,
+		cmdChan:         cmdChan,
+		subscribeChan:   subscribeChan,
+		unsubscribeChan: unsubscribeChan,
+		metrics:         metrics,
 	}
 }
 
@@ -42,17 +48,31 @@ func (s *Server) Start() error {
 		return fmt.Errorf("failed to start server on %s: %v", s.addr, err)
 	}
 
+	s.listener = ln
 	log.Printf("[server] listening on %s\n", s.addr)
+	return nil
+}
+
+func (s *Server) Serve() error {
 	for {
-		conn, err := ln.Accept()
+		conn, err := s.listener.Accept()
 		if err != nil {
+			if errors.Is(err, net.ErrClosed) {
+				return nil
+			}
+
 			log.Printf("[server] accept error: %v\n", err)
 			continue
 		}
 		s.activeConnections.Add(1)
 		s.metrics.SetActiveConnections(s.activeConnections.Load())
-		go s.handleConnection(conn)
+		s.wg.Go(func() { s.handleConnection(conn) })
 	}
+}
+
+func (s *Server) ShutDown() {
+	_ = s.listener.Close()
+	s.wg.Wait()
 }
 
 // handleConnection serves a single client connection until it closes or errors.
@@ -123,34 +143,56 @@ func (s *Server) handleSubscribe(conn net.Conn, topics []string) {
 		return
 	}
 
+	done := make(chan struct{})
+	go func() {
+		subscribeConnChecker(conn, done)
+	}()
+
 	channels := s.registerSubscription(conn, topics)
 	defer s.cleanupSubscription(channels)
 
 	merged := s.fanIn(channels)
 
-	s.forwardMessages(conn, merged)
+	s.forwardMessages(conn, merged, done)
 }
 
 // registerSubscription subscribes the client to each topic and writes a RESP subscribe confirmation per topic.
 // @returns map[topic]chan: the per-topic channels that will receive published messages.
 func (s *Server) registerSubscription(conn net.Conn, topics []string) map[string]chan []byte {
-	channels := make(map[string]chan []byte, len(topics))
+	subscribers := make(map[string]chan []byte, len(topics))
 	for _, topic := range topics {
-		ch := s.store.Subscribe(topic)
-		channels[topic] = ch
-
-		s.writeToConnection(conn, parser.Array("subscribe", topic, "1"))
+		subscribers[topic] = make(chan []byte, 16)
 	}
 
-	return channels
+	done := make(chan struct{})
+	s.subscribeChan <- models.SubscribeReq{
+		Subscribers: subscribers,
+		Done:        done,
+	}
+	<-done
+
+	// Each topic gets its own complete RESP array (*3: "subscribe", topic,
+	// count) — concatenated into one buffer for a single write() syscall,
+	// but still N independently-decodable top-level replies, matching what
+	// a client reading one confirmation per topic expects.
+	var confirmations []byte
+	for i, topic := range topics {
+		confirmations = append(confirmations, parser.Array("subscribe", topic, strconv.Itoa(i+1))...)
+	}
+	s.writeToConnection(conn, confirmations)
+
+	return subscribers
 }
 
 // cleanupSubscription unregisters every channel in channels from the store's pubsub map.
 // Intended to run as a deferred call in handleSubscribe so cleanup is guaranteed on exit.
 func (s *Server) cleanupSubscription(channels map[string]chan []byte) {
-	for topic, ch := range channels {
-		s.store.Unsubscribe(topic, ch)
+	done := make(chan struct{})
+	s.unsubscribeChan <- models.UnsubscribeReq{
+		SubscribedTopics: channels,
+		Done:             done,
 	}
+	<-done
 }
 
 // fanIn merges multiple per-topic subscription channels into a single receive channel.
@@ -171,9 +213,17 @@ func (s *Server) fanIn(channels map[string]chan []byte) <-chan []byte {
 
 // forwardMessages drains merged and writes each message to conn.
 // Returns as soon as a write fails, signalling the caller to tear down the subscription.
-func (s *Server) forwardMessages(conn net.Conn, merged <-chan []byte) {
-	for msg := range merged {
-		if err := s.writeToConnection(conn, msg); err != nil {
+func (s *Server) forwardMessages(conn net.Conn, merged <-chan []byte, done chan struct{}) {
+	for {
+		select {
+		case msg, ok := <-merged:
+			if !ok {
+				return
+			}
+			if err := s.writeToConnection(conn, msg); err != nil {
+				return
+			}
+		case <-done:
 			return
 		}
 	}
@@ -189,4 +239,17 @@ func (s *Server) writeToConnection(conn net.Conn, msg []byte) error {
 	}
 	s.metrics.IncBytesSent(int64(bytesWritten))
 	return nil
+}
+
+// Just Read from the subscriber channel continuously in order to check if
+// the client connection is alive or not.
+func subscribeConnChecker(conn net.Conn, done chan struct{}) {
+	defer close(done)
+	buffer := make([]byte, 1)
+	for {
+		_, err := conn.Read(buffer)
+		if err != nil {
+			return
+		}
+	}
 }

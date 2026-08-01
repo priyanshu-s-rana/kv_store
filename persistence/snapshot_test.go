@@ -5,7 +5,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
-	"time"
+
+	"github.com/priyanshu-s-rana/kv_store/utils"
 )
 
 func newTestSnapshot(t *testing.T, dir string) *Snapshot {
@@ -103,7 +104,7 @@ func TestSnapshotSaveTTLEntries(t *testing.T) {
 	dir := t.TempDir()
 	snap := newTestSnapshot(t, dir)
 
-	expiry := time.Now().Add(time.Hour).Truncate(0) // strip monotonic reading for exact gob round trip
+	expiry := utils.AbsoluteExpiry(3600)
 	data := map[string]SnapshotEntry{
 		"withttl": {Value: []byte("v"), Expiry: expiry},
 		"nottl":   {Value: []byte("v")},
@@ -116,10 +117,10 @@ func TestSnapshotSaveTTLEntries(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if !loaded.Data["withttl"].Expiry.Equal(expiry) {
+	if loaded.Data["withttl"].Expiry != expiry {
 		t.Errorf("withttl expiry = %v, want %v", loaded.Data["withttl"].Expiry, expiry)
 	}
-	if !loaded.Data["nottl"].Expiry.IsZero() {
+	if loaded.Data["nottl"].Expiry != 0 {
 		t.Errorf("nottl expiry = %v, want zero", loaded.Data["nottl"].Expiry)
 	}
 }

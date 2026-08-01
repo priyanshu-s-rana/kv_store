@@ -2,7 +2,8 @@ package store
 
 import (
 	"testing"
-	"time"
+
+	"github.com/priyanshu-s-rana/kv_store/utils"
 )
 
 // ---- SnapshotEntry helpers ----
@@ -16,8 +17,8 @@ func TestSnapshotEntryHasExpiry(t *testing.T) {
 		want bool
 	}{
 		{"zero expiry", SnapshotEntry{}, false},
-		{"future expiry", SnapshotEntry{Expiry: time.Now().Add(time.Hour)}, true},
-		{"past expiry", SnapshotEntry{Expiry: time.Now().Add(-time.Hour)}, true},
+		{"future expiry", SnapshotEntry{Expiry: utils.AbsoluteExpiry(3600)}, true},
+		{"past expiry", SnapshotEntry{Expiry: utils.AbsoluteExpiry(-3600)}, true},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -36,8 +37,8 @@ func TestSnapshotEntryIsExpired(t *testing.T) {
 		want bool
 	}{
 		{"zero expiry (no TTL)", SnapshotEntry{}, false},
-		{"future expiry", SnapshotEntry{Expiry: time.Now().Add(time.Hour)}, false},
-		{"past expiry", SnapshotEntry{Expiry: time.Now().Add(-time.Hour)}, true},
+		{"future expiry", SnapshotEntry{Expiry: utils.AbsoluteExpiry(3600)}, false},
+		{"past expiry", SnapshotEntry{Expiry: utils.AbsoluteExpiry(-3600)}, true},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -58,8 +59,8 @@ func TestSnapshotEntryIsExpired(t *testing.T) {
 // Verifies capture skips expired entries.
 func TestCaptureSkipsExpired(t *testing.T) {
 	s := newTestStore()
-	s.data["alive"] = &entry{value: []byte("a"), expiry: time.Now().Add(time.Hour)}
-	s.data["expired"] = &entry{value: []byte("e"), expiry: time.Now().Add(-time.Hour)}
+	s.data["alive"] = &entry{value: []byte("a"), expiry: utils.AbsoluteExpiry(3600)}
+	s.data["expired"] = &entry{value: []byte("e"), expiry: utils.AbsoluteExpiry(-3600)}
 	s.data["noexp"] = &entry{value: []byte("n")}
 
 	data, err := s.capture()

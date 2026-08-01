@@ -123,7 +123,7 @@ func (aof *AOF) Replay(cmdChan chan<- Command, snapshotSequenceID uint64) (bool,
 				Args: cmd.Args[2:],
 			}
 
-			if err := sendCommandToEventLoop(cmdChan, actualCmd.Name, actualCmd.Args); err != nil {
+			if err := sendCommandToEventLoop(cmdChan, actualCmd.Name, actualCmd.Args); err != nil && handleExpiredKeyReplayError(cmdChan, *actualCmd, err) {
 				return replayCounter > 0, latestSquenceID, err
 			}
 
