@@ -16,5 +16,6 @@ go.work.sum
 # OS
 .DS_Store
 
-# directory
-/benchmarks
+# benchmark run output (scripts + README are tracked, results are not)
+/benchmarks/*
+!/benchmarks/README.md

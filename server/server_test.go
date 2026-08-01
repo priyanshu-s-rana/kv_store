@@ -165,12 +165,16 @@ func (m *spyServerMetrics) BytesSent() int64 {
 var _ ServerMetrics = (*spyServerMetrics)(nil)
 
 // newTestStore builds a Store with its event loop running against a fresh
-// command channel wired to a no-op Persistence.
-func newTestStore() (*store.Store, chan store.Command) {
+// set of command/subscribe/unsubscribe channels, wired to a no-op
+// Persistence. The three channels must be handed to server.New unchanged so
+// the server's requests actually reach this store's event loop.
+func newTestStore() (*store.Store, chan store.Command, chan store.SubscribeReq, chan store.UnsubscribeReq) {
 	cmdChan := make(chan store.Command)
-	st := store.New(0, cmdChan, fakePersistence{}, noopStoreMetrics{})
+	subscribeChan := make(chan store.SubscribeReq)
+	unsubscribeChan := make(chan store.UnsubscribeReq)
+	st := store.New(0, cmdChan, subscribeChan, unsubscribeChan, fakePersistence{}, noopStoreMetrics{})
 	st.Start()
-	return st, cmdChan
+	return st, cmdChan, subscribeChan, unsubscribeChan
 }
 
 // testConn creates an in-memory server/client pair using net.Pipe.
@@ -178,8 +182,8 @@ func newTestStore() (*store.Store, chan store.Command) {
 // t.Cleanup closes the client connection.
 func testConn(t *testing.T) (net.Conn, *bufio.Reader) {
 	t.Helper()
-	st, cmdChan := newTestStore()
-	s := New("", cmdChan, st, newSpyServerMetrics())
+	_, cmdChan, subscribeChan, unsubscribeChan := newTestStore()
+	s := New("", cmdChan, subscribeChan, unsubscribeChan, newSpyServerMetrics())
 	client, srv := net.Pipe()
 	t.Cleanup(func() { client.Close() })
 	go s.handleConnection(srv)
@@ -358,8 +362,8 @@ func TestClientDisconnect(t *testing.T) {
 // ---- PUB/SUB ----
 
 func TestSubscribeAndPublish(t *testing.T) {
-	st, cmdChan := newTestStore()
-	s := New("", cmdChan, st, newSpyServerMetrics())
+	_, cmdChan, subscribeChan, unsubscribeChan := newTestStore()
+	s := New("", cmdChan, subscribeChan, unsubscribeChan, newSpyServerMetrics())
 
 	subConn, subSrv := net.Pipe()
 	t.Cleanup(func() { subConn.Close() })
@@ -714,11 +718,9 @@ func TestMEMORYSTATS(t *testing.T) {
 // testServer creates an in-memory server and returns the connection, reader, and the metrics spy it reports to.
 func testServer(t *testing.T) (net.Conn, *bufio.Reader, *spyServerMetrics) {
 	t.Helper()
-	cmdChan := make(chan store.Command)
-	st := store.New(0, cmdChan, fakePersistence{}, noopStoreMetrics{})
-	st.Start()
+	_, cmdChan, subscribeChan, unsubscribeChan := newTestStore()
 	metrics := newSpyServerMetrics()
-	s := New("", cmdChan, st, metrics)
+	s := New("", cmdChan, subscribeChan, unsubscribeChan, metrics)
 	client, srv := net.Pipe()
 	t.Cleanup(func() { client.Close() })
 	go s.handleConnection(srv)
@@ -726,11 +728,9 @@ func testServer(t *testing.T) (net.Conn, *bufio.Reader, *spyServerMetrics) {
 }
 
 func TestMetricsTotalConnectionsAccepted(t *testing.T) {
-	cmdChan := make(chan store.Command)
-	st := store.New(0, cmdChan, fakePersistence{}, noopStoreMetrics{})
-	st.Start()
+	_, cmdChan, subscribeChan, unsubscribeChan := newTestStore()
 	metrics := newSpyServerMetrics()
-	s := New("", cmdChan, st, metrics)
+	s := New("", cmdChan, subscribeChan, unsubscribeChan, metrics)
 
 	c1, srv1 := net.Pipe()
 	c2, srv2 := net.Pipe()

@@ -1,68 +1,43 @@
 package store
 
 import (
-	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/priyanshu-s-rana/kv_store/constants"
 	"github.com/priyanshu-s-rana/kv_store/data_type/heap"
 	"github.com/priyanshu-s-rana/kv_store/lru"
 	"github.com/priyanshu-s-rana/kv_store/models"
+	"github.com/priyanshu-s-rana/kv_store/utils"
 )
 
 type (
-	Command  = models.Command
-	Response = models.Response
+	Command        = models.Command
+	Response       = models.Response
+	SubscribeReq   = models.SubscribeReq
+	UnsubscribeReq = models.UnsubscribeReq
 )
 
 type entry struct {
 	value  []byte
-	expiry time.Time
+	expiry int64
 }
 
 // Check if the entry is expired based on the current time and the expiry time
 func (e *entry) isExpired() bool {
-	if e.expiry.IsZero() {
+	if e.expiry == 0 {
 		return false
 	}
-	return time.Now().After(e.expiry)
+	return utils.AbsoluteTimeNow() >= e.expiry
 }
 
 // Check if the entry has an expiry time set
 func (e *entry) hasExpiry() bool {
-	return !e.expiry.IsZero()
+	return !(e.expiry == 0)
 }
 
 type ttlItem struct {
 	key       string
-	expiresAt time.Time
-}
-
-type pubSubStats struct {
-	activeTopics      atomic.Int64
-	activeSubscribers atomic.Int64
-	metrics           StoreMetrics
-}
-
-func (p *pubSubStats) incActiveTopics() {
-	p.activeTopics.Add(1)
-	p.metrics.SetActiveTopics(p.activeTopics.Load())
-}
-
-func (p *pubSubStats) decActiveTopics() {
-	p.activeTopics.Add(-1)
-	p.metrics.SetActiveTopics(p.activeTopics.Load())
-}
-
-func (p *pubSubStats) incActiveSubscribers() {
-	p.activeSubscribers.Add(1)
-	p.metrics.SetActiveSubscribers(p.activeSubscribers.Load())
-}
-
-func (p *pubSubStats) decActiveSubscribers() {
-	p.activeSubscribers.Add(-1)
-	p.metrics.SetActiveSubscribers(p.activeSubscribers.Load())
+	expiresAt int64
 }
 
 type Persistence interface {
@@ -72,32 +47,33 @@ type Persistence interface {
 }
 
 type Store struct {
-	data          map[string]*entry        // Real data of key value
-	cmdChan       chan Command             // Command channel which Event Loop interacts with
-	ttls          *heap.Heap[ttlItem]      // TTL heap
-	pubsub        map[string][]chan []byte // Pubsub for different Clients
-	mut           sync.Mutex               // Mutex for pubsub
-	snapResp      chan SnapshotResponse    // Channel for snapshot responses
-	lru           *lru.LRU                 // LRU key eviction when memory is full
-	memoryProfile *MemoryProfile           // Memory Profiling to keep track of size
-	persistence   Persistence
-	pubSubStats   *pubSubStats
-	metrics       StoreMetrics
+	data            map[string]*entry        // Real data of key value
+	cmdChan         <-chan Command           // Command channel which Event Loop interacts with
+	subscribeChan   <-chan SubscribeReq      // Subscribe channel to recieve subscribe requests
+	unsubscribeChan <-chan UnsubscribeReq    // Unsubscribe channel to recieve unsubscribe reqestus
+	ttls            *heap.Heap[ttlItem]      // TTL heap
+	pubsub          map[string][]chan []byte // Pubsub for different Clients
+	snapResp        chan SnapshotResponse    // Channel for snapshot responses
+	lru             *lru.LRU                 // LRU key eviction when memory is full
+	memoryProfile   *MemoryProfile           // Memory Profiling to keep track of size
+	persistence     Persistence              // Persistence for the store
+	metrics         StoreMetrics             // Metrics for Prometheus
 }
 
 // New creates and returns a Store with its event loop and TTL eviction goroutines running.
-func New(memorySize int64, cmdChan chan Command, persistence Persistence, metrics StoreMetrics) *Store {
+func New(memorySize int64, cmdChan chan Command, subscribeChan chan SubscribeReq, unsubscribeChan chan UnsubscribeReq, persistence Persistence, metrics StoreMetrics) *Store {
 	store := &Store{
-		data:    make(map[string]*entry),
-		cmdChan: cmdChan,
+		data:            make(map[string]*entry),
+		cmdChan:         cmdChan,
+		subscribeChan:   subscribeChan,
+		unsubscribeChan: unsubscribeChan,
 		ttls: heap.New[ttlItem](func(a, b ttlItem) bool {
-			return a.expiresAt.Before(b.expiresAt)
+			return a.expiresAt < b.expiresAt
 		}),
 		pubsub:        make(map[string][]chan []byte),
 		snapResp:      make(chan SnapshotResponse, 1),
 		lru:           lru.New(),
 		memoryProfile: NewMemProfile(memorySize, metrics),
-		pubSubStats:   &pubSubStats{metrics: metrics},
 		persistence:   persistence,
 		metrics:       metrics,
 	}
@@ -107,47 +83,68 @@ func New(memorySize int64, cmdChan chan Command, persistence Persistence, metric
 
 func (store *Store) Start() {
 	go store.eventLoop()
-	go store.ttlEviction()
 }
 
 // eventLoop processes commands from cmdChan sequentially, ensuring single-threaded data access.
 func (store *Store) eventLoop() {
-	for cmd := range store.cmdChan {
-		start := time.Now()
-		store.metrics.IncCommandsExecuted(cmd.Name)
-
-		var resp Response
-		cmdMeta, ok := Registry[cmd.Name]
-		if !ok {
-			resp = store._default(cmd)
-		} else {
-			resp = cmdMeta.Handler(store, cmd.Args)
-			if cmdMeta.IsWrite && !cmd.SkipAof {
-				store.persistence.Append(cmd.Name, cmd.Args)
-			}
-		}
-
-		store.metrics.ObserveCommandDuration(cmd.Name, time.Since(start))
-		if err := resp.IsError(); err != nil {
-			store.metrics.IncCommandFailures(cmd.Name)
-		}
-
+	ticker := time.NewTicker(1 * time.Second)
+	defer ticker.Stop()
+	for {
 		select {
-		case cmd.Resp <- resp:
-		default:
+		case <-ticker.C:
+			store.evict(nil)
+		case cmd := <-store.cmdChan:
+			store.handleCommand(&cmd)
+		case req := <-store.subscribeChan:
+			store.handleSubscribeReq(&req)
+		case req := <-store.unsubscribeChan:
+			store.handleUnsubscribeReq(&req)
 		}
 	}
 }
 
-// ttlEviction ticks every second and sends an internal EVICT command to prune expired keys.
-func (store *Store) ttlEviction() {
-	ticker := time.NewTicker(1 * time.Second)
-	defer ticker.Stop()
+func (store *Store) handleCommand(cmd *Command) {
+	start := time.Now()
+	store.metrics.IncCommandsExecuted(cmd.Name)
 
-	for range ticker.C {
-		store.cmdChan <- Command{
-			Name: constants.EVICT,
-			Resp: make(chan Response, 1),
+	normaliseCommand(cmd)
+	var resp Response
+	cmdMeta, ok := registry[cmd.Name]
+
+	if !ok {
+		resp = store._default(*cmd)
+	} else {
+		resp = cmdMeta.handler(store, cmd.Args)
+		if cmdMeta.isWrite && !cmd.SkipAof && resp.IsError() == nil {
+			store.persistence.Append(cmd.Name, cmd.Args)
 		}
 	}
+
+	store.metrics.ObserveCommandDuration(cmd.Name, time.Since(start))
+	if err := resp.IsError(); err != nil {
+		store.metrics.IncCommandFailures(cmd.Name)
+	}
+
+	select {
+	case cmd.Resp <- resp:
+	default:
+	}
+}
+
+func (store *Store) handleSubscribeReq(req *SubscribeReq) {
+	start := time.Now()
+	store.metrics.IncCommandsExecuted(constants.Subscribe)
+	store.subscribe(req.Subscribers)
+
+	store.metrics.ObserveCommandDuration(constants.Subscribe, time.Since(start))
+
+	close(req.Done)
+}
+
+func (store *Store) handleUnsubscribeReq(req *UnsubscribeReq) {
+	start := time.Now()
+	store.metrics.IncCommandsExecuted(constants.Unsubscribe)
+	store.unsubscribe(req.SubscribedTopics)
+	close(req.Done)
+	store.metrics.ObserveCommandDuration(constants.Unsubscribe, time.Since(start))
 }

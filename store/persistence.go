@@ -1,12 +1,12 @@
 package store
 
 import (
-	"time"
+	"github.com/priyanshu-s-rana/kv_store/utils"
 )
 
 type SnapshotEntry struct {
 	Value  []byte
-	Expiry time.Time
+	Expiry int64
 }
 
 type SnapshotResponse struct {
@@ -15,14 +15,14 @@ type SnapshotResponse struct {
 }
 
 func (se *SnapshotEntry) HasExpiry() bool {
-	return !se.Expiry.IsZero()
+	return !(se.Expiry == 0)
 }
 
 func (se *SnapshotEntry) IsExpired() bool {
-	if se.Expiry.IsZero() {
+	if se.Expiry == 0 {
 		return false
 	}
-	return time.Now().After(se.Expiry)
+	return utils.AbsoluteTimeNow() >= se.Expiry
 }
 
 func (s *Store) capture() (map[string]SnapshotEntry, error) {

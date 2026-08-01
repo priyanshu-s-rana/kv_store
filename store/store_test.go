@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/priyanshu-s-rana/kv_store/constants"
+	"github.com/priyanshu-s-rana/kv_store/utils"
 )
 
 // fakePersistence is a no-op Persistence used to run a real event loop in
@@ -161,12 +162,18 @@ func (m *spyStoreMetrics) MessagesPublished() int {
 	return m.messagesPublished
 }
 
-// newStore builds a Store with its event loop and TTL eviction goroutines
-// running against a fresh command channel, wired to a no-op Persistence.
+// newStore builds a Store with its event loop running against a fresh
+// command channel, wired to a no-op Persistence. subscribeChan/
+// unsubscribeChan are created internally and only ever read by the event
+// loop — no test in this file drives pub/sub through the channel API
+// directly (that's covered in commands_test.go, which calls the
+// lower-level subscribe/unsubscribe methods synchronously).
 func newStore(t *testing.T, memorySize int64) (*Store, chan Command) {
 	t.Helper()
 	cmdChan := make(chan Command)
-	s := New(memorySize, cmdChan, fakePersistence{}, newSpyStoreMetrics())
+	subscribeChan := make(chan SubscribeReq)
+	unsubscribeChan := make(chan UnsubscribeReq)
+	s := New(memorySize, cmdChan, subscribeChan, unsubscribeChan, fakePersistence{}, newSpyStoreMetrics())
 	s.Start()
 	return s, cmdChan
 }
@@ -196,12 +203,12 @@ func send(t *testing.T, cmdChan chan Command, name constants.CmdName, args ...st
 func TestEntryIsExpired(t *testing.T) {
 	cases := []struct {
 		name   string
-		expiry time.Time
+		expiry int64
 		want   bool
 	}{
-		{"zero expiry (no TTL)", time.Time{}, false},
-		{"future expiry", time.Now().Add(10 * time.Second), false},
-		{"past expiry", time.Now().Add(-1 * time.Second), true},
+		{"zero expiry (no TTL)", 0, false},
+		{"future expiry", utils.AbsoluteExpiry(10), false},
+		{"past expiry", utils.AbsoluteExpiry(-1), true},
 	}
 
 	for _, c := range cases {
@@ -217,12 +224,12 @@ func TestEntryIsExpired(t *testing.T) {
 func TestEntryHasExpiry(t *testing.T) {
 	cases := []struct {
 		name   string
-		expiry time.Time
+		expiry int64
 		want   bool
 	}{
-		{"zero expiry", time.Time{}, false},
-		{"future expiry", time.Now().Add(10 * time.Second), true},
-		{"past expiry (still counts as having one)", time.Now().Add(-1 * time.Second), true},
+		{"zero expiry", 0, false},
+		{"future expiry", utils.AbsoluteExpiry(10), true},
+		{"past expiry (still counts as having one)", utils.AbsoluteExpiry(-1), true},
 	}
 
 	for _, c := range cases {
@@ -260,9 +267,6 @@ func TestNewInitializesFields(t *testing.T) {
 	}
 	if s.memoryProfile == nil {
 		t.Errorf("memoryProfile not initialized")
-	}
-	if s.pubSubStats == nil {
-		t.Errorf("pubSubStats not initialized")
 	}
 }
 
@@ -318,6 +322,9 @@ func TestEventLoopDispatchesDel(t *testing.T) {
 	}
 }
 
+// Sent through the real event loop, so normalizeCommand rewrites EXPIRE ->
+// PEXPIREAT with an absolute deadline before dispatch — this exercises the
+// exact path a real client's EXPIRE command takes.
 func TestEventLoopDispatchesExpireAndTTL(t *testing.T) {
 	_, cmdChan := newStore(t, 0)
 	send(t, cmdChan, constants.Set, "k", "v")

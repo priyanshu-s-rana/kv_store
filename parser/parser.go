@@ -16,14 +16,16 @@ type Command struct {
 }
 
 type Parser struct {
-	reader *bufio.Reader
+	reader  *bufio.Reader
+	lineBuf []byte
 }
 
 // New creates a Parser that reads commands from r.
 // @returns *Parser: wraps r in a bufio.Reader internally.
 func New(r io.Reader) *Parser {
 	return &Parser{
-		reader: bufio.NewReader(r),
+		reader:  bufio.NewReader(r),
+		lineBuf: make([]byte, constants.MaxLineLen),
 	}
 }
 
@@ -60,6 +62,9 @@ func (p *Parser) ReadCommand() (*Command, error) {
 	if arrLength <= 0 {
 		return nil, fmt.Errorf(constants.INV_CMD_ARRAY_LEN, arrLength)
 	}
+	if arrLength > constants.MaxArrayLen {
+		return nil, fmt.Errorf(constants.INV_ARR_LEN_TOO_LARGE, arrLength)
+	}
 
 	parts := make([]string, 0, arrLength)
 	for range arrLength {
@@ -84,11 +89,24 @@ func (p *Parser) ReadCommand() (*Command, error) {
 // @returns string: line content with trailing "\r\n" or "\n" stripped.
 // @returns io.EOF: if the stream closes before a newline is seen.
 func (p *Parser) readLine() (string, error) {
-	line, err := p.reader.ReadString('\n')
-	if err != nil {
+	p.lineBuf = p.lineBuf[:0]
+	for {
+		frag, err := p.reader.ReadSlice('\n')
+		p.lineBuf = append(p.lineBuf, frag...)
+		if len(p.lineBuf) > constants.MaxLineLen {
+			return "", fmt.Errorf(constants.LINE_TOO_LONG)
+		}
+		if err == nil {
+			break
+		}
+		if err == bufio.ErrBufferFull {
+			continue
+		}
+
 		return "", err
 	}
-	return strings.TrimRight(line, "\r\n"), nil
+
+	return strings.TrimRight(string(p.lineBuf), "\r\n"), nil
 }
 
 // parseLine parses an inline-format command from a single line.
@@ -133,6 +151,12 @@ func (p *Parser) readBulkString() (value string, isNull bool, err error) {
 	length, err := strconv.Atoi(line[1:])
 	if err != nil {
 		return "", false, fmt.Errorf(constants.INV_STR_PARSER, line)
+	}
+	if length < 0 {
+		return "", false, fmt.Errorf(constants.INV_STR_LEN_PARSER, line)
+	}
+	if length > constants.MaxBulkLen {
+		return "", false, fmt.Errorf(constants.INV_STR_LEN_TOO_LARGE, line)
 	}
 
 	buf := make([]byte, length+2) // +2 for \r\n

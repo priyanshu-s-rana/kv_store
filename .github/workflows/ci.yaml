@@ -92,6 +92,23 @@ jobs:
             echo "| ❌ Failed | $failed |"
           } >> $GITHUB_STEP_SUMMARY
 
+  integration-test:
+    name: Integration
+    needs: [format, secrets, test]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      # Process-level tests behind the `integration` build tag: builds the
+      # real kv-server binary and drives it as a subprocess (real SIGKILL,
+      # real restarts, real config) — see integration/README or the test
+      # file headers for what each one covers.
+      - name: Run integration tests
+        run: make test-integration
+
   coverage:
     name: Coverage
     needs: [format, secrets, test]
@@ -103,7 +120,7 @@ jobs:
           go-version-file: go.mod
           cache: true
       - name: Run coverage
-        run: go test -count=1 -timeout 120s -coverprofile=coverage.out -covermode=atomic ./...
+        run: make coverage
       - name: Write coverage summary
         run: |
           total=$(go tool cover -func=coverage.out | grep 'total:' | awk '{print $3}')

@@ -1,6 +1,7 @@
 package persistence
 
 import (
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -28,10 +29,20 @@ func sendCommandToEventLoop(cmdChan chan<- Command, name constants.CmdName, args
 	}
 	resp := <-responseChan
 	if err := resp.IsError(); err != nil {
-		return fmt.Errorf("Error occured after sending command to eventLoop: %v", err)
+		return fmt.Errorf("Error occured after sending command to eventLoop: %w", err)
 	}
 
 	return nil
+}
+
+func handleExpiredKeyReplayError(cmdChan chan<- Command, actualCmd Command, err error) bool {
+	if !errors.Is(err, constants.ALRDY_EXPIRED_ERR) {
+		return true
+	}
+	if delErr := sendCommandToEventLoop(cmdChan, constants.Del, actualCmd.Args[:1]); delErr != nil {
+		return true
+	}
+	return false
 }
 
 func (p *Persistence) saveSnapshot(data map[string]SnapshotEntry, sealedGen uint64, lastSequenceID uint64) (err error) {

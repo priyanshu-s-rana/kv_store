@@ -16,12 +16,14 @@ type MemoryProfile struct {
 	maxBytes  int64 // Set when initialized
 	peakBytes int64 // Peak Memory Size at any given time
 
-	keyCount    int64 // Total key count in the memory (s.data)
-	keyBytes    int64 // Memory acquired by key
-	valueBytes  int64 // Memory acquired by value (also consist of entry overhead)
-	ttlBytes    int64 // Memory acquired by ttl (ttl heap, also contains ttlItem overhead)
-	lruBytes    int64 // Memory acquired by lru (lru index, also contain lru node overhead)
-	pubsubBytes int64 // Memory acquired by pubsub
+	keyCount          int64 // Total key count in the memory (s.data)
+	keyBytes          int64 // Memory acquired by key
+	valueBytes        int64 // Memory acquired by value (also consist of entry overhead)
+	ttlBytes          int64 // Memory acquired by ttl (ttl heap, also contains ttlItem overhead)
+	lruBytes          int64 // Memory acquired by lru (lru index, also contain lru node overhead)
+	pubsubBytes       int64 // Memory acquired by pubsub
+	activeTopics      int64 // Total active Topics
+	activeSubscribers int64 // Total active Subscribers
 
 	metrics StoreMetrics
 }
@@ -55,6 +57,8 @@ func (memProf *MemoryProfile) reportMemory() {
 	memProf.metrics.SetTTLBytes(memProf.ttlBytes)
 	memProf.metrics.SetLRUBytes(memProf.lruBytes)
 	memProf.metrics.SetPubSubBytes(memProf.pubsubBytes)
+	memProf.metrics.SetActiveTopics(memProf.activeTopics)
+	memProf.metrics.SetActiveSubscribers(memProf.activeSubscribers)
 }
 
 // currentMemorySize returns the total tracked bytes including fixed struct overhead.
@@ -145,6 +149,7 @@ func (memProf *MemoryProfile) recordPubSubTopicSize(topic string) {
 		return
 	}
 	memProf.pubsubBytes += constants.STRING_OVERHEAD + int64(len(topic))
+	memProf.activeTopics++
 	memProf.reportMemory()
 }
 
@@ -155,12 +160,14 @@ func (memProf *MemoryProfile) recordPubSubTopicRemove(topic string) {
 	}
 	memProf.pubsubBytes -= constants.STRING_OVERHEAD + int64(len(topic))
 	_resetToZeroIfNegative(&memProf.pubsubBytes)
+	memProf.activeTopics--
 	memProf.reportMemory()
 }
 
 // recordPubSubSubscriber charges pubsubBytes for one new subscriber channel.
 func (memProf *MemoryProfile) recordPubSubSubscriber() {
 	memProf.pubsubBytes += constants.BYTE_CHANNEL_OVERHEAD // chan []byte
+	memProf.activeSubscribers++
 	memProf.reportMemory()
 }
 
@@ -168,6 +175,7 @@ func (memProf *MemoryProfile) recordPubSubSubscriber() {
 func (memProf *MemoryProfile) recordPubSubSubscriberRemove() {
 	memProf.pubsubBytes -= constants.BYTE_CHANNEL_OVERHEAD
 	_resetToZeroIfNegative(&memProf.pubsubBytes)
+	memProf.activeSubscribers--
 	memProf.reportMemory()
 }
 

@@ -5,10 +5,10 @@ import (
 	"math"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/priyanshu-s-rana/kv_store/constants"
 	"github.com/priyanshu-s-rana/kv_store/parser"
+	"github.com/priyanshu-s-rana/kv_store/utils"
 )
 
 // set_with_modifiers applies NX, XX, and EX modifiers to the entry before it is stored.
@@ -19,28 +19,36 @@ func setWithModifiers(s *Store, args []string, e *entry) (Response, bool) {
 	key := args[0]
 	var item *ttlItem
 	for i := 2; i < n; i++ {
+		switch {
 		// Do not set the key if it already exists when NX is specified.
-		if args[i] == constants.NX {
+		case utils.SimilarStrings(args[i], constants.NX):
 			if _, exists := s.data[key]; exists {
 				return Response{Value: parser.NullBulkString()}, false
 			}
-		}
+
 		// Do not set the key if it does not exist when XX is specified.
-		if args[i] == constants.XX {
+		case utils.SimilarStrings(args[i], constants.XX):
 			if _, exists := s.data[key]; !exists {
 				return Response{Value: parser.NullBulkString()}, false
 			}
-		}
-		// Set the key with an expiry time in seconds when EX is specified.
-		if args[i] == constants.EX {
+
+		// Set the key with an expiry time in seconds when PXAT is specified.
+		// Exipry value have absolute timestamp.
+		case utils.SimilarStrings(args[i], constants.PXAT):
 			if i+1 >= n {
 				return Response{Value: parser.Error(constants.INV_EXPIRY)}, false
 			}
-			secs, err := strconv.Atoi(args[i+1])
-			if err != nil || secs < 0 {
+
+			expiry, err := strconv.ParseInt(args[i+1], 10, 64)
+			if err != nil || expiry <= 0 {
 				return Response{Value: parser.Error(constants.INV_EXPIRY)}, false
 			}
-			e.expiry = time.Now().Add(time.Duration(secs) * time.Second)
+			if expiry <= utils.AbsoluteTimeNow() {
+				return Response{Value: parser.Error(constants.ALRDY_EXPIRED),
+					Err: constants.ALRDY_EXPIRED_ERR}, false
+			}
+
+			e.expiry = expiry
 			t := ttlItem{key: key, expiresAt: e.expiry}
 			s.ttls.Push(t)
 			item = &t
@@ -54,6 +62,9 @@ func setWithModifiers(s *Store, args []string, e *entry) (Response, bool) {
 // keyMatcher returns a function that reports whether a key matches the glob-style pattern.
 // Supports leading *, trailing *, both (* contains *), and exact match.
 func keyMatcher(pattern string) func(string) bool {
+	if pattern == "" {
+		return func(key string) bool { return false }
+	}
 	prefix := pattern[0] == '*'
 	suffix := pattern[len(pattern)-1] == '*'
 	switch {
@@ -182,5 +193,41 @@ func msetPairs(s *Store, args []string, keyCount int) {
 	for i := range keyCount {
 		e := entry{value: []byte(args[i*2+1])}
 		setKey(s, args[i*2], &e, nil)
+	}
+}
+
+func (s *Store) applyExpiry(expiry int64, e *entry, key string, item *ttlItem) *ttlItem {
+	e.expiry = expiry
+	t := ttlItem{key: key, expiresAt: e.expiry}
+	s.ttls.Push(t)
+	return &t
+}
+
+func normaliseCommand(cmd *Command) {
+	switch cmd.Name {
+	case constants.Expire:
+		cmd.Name = constants.PExpireAt
+		if len(cmd.Args) >= 2 {
+			expiry, err := utils.ConvertToAbsoluteExpiry(cmd.Args[1])
+			if err != nil {
+				return
+			}
+			cmd.Args[1] = expiry
+		}
+
+	case constants.Set:
+		for i := 2; i < len(cmd.Args); i++ {
+			if utils.SimilarStrings(cmd.Args[i], constants.EX) {
+				cmd.Args[i] = constants.PXAT
+				if i+1 >= len(cmd.Args) {
+					return
+				}
+				expiry, err := utils.ConvertToAbsoluteExpiry(cmd.Args[i+1])
+				if err != nil {
+					return
+				}
+				cmd.Args[i+1] = expiry
+			}
+		}
 	}
 }

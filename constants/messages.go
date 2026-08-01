@@ -13,20 +13,24 @@ const (
 
 	// Error messages
 	INV_EXPIRY             = "invalid expiry time"
+	ALRDY_EXPIRED          = "expiry already elapsed"
 	WRONG_NUM_ARGS         = "wrong number of arguments for %s"
 	UNKNOWN_CMD            = "unknown command %s"
 	INV_ARR_LEN_PARSER     = "invalid array length: %s"
 	EMPTY_CMD              = "empty line command"
 	INV_ARRAY_LEN          = "invalid array length: %s"
+	INV_ARR_LEN_TOO_LARGE  = "array length exceeds maximum: %d"
 	INV_CMD_ARRAY_LEN      = "invalid command array length: %d"
 	INV_STR_PARSER         = "invalid bulk string format: %s"
 	INV_STR_LEN_PARSER     = "invalid bulk string length: %s"
+	INV_STR_LEN_TOO_LARGE  = "bulk string length exceeds maximum: %s"
 	NOT_INTEGER            = "value is not integer or out of range"
 	CAPTURE_ERROR          = "capturing store data: %v"
 	CHECKPOINT_ERROR       = "during checkpoint: %v"
 	CHECKPOINT_IN_PROGRESS = "checkpoint is still in progress"
 	CHECKPOINT_FAILED      = "checkpoint failed"
 	REBASELINE_ERROR       = "during rebaseline: %v"
+	LINE_TOO_LONG          = "line exceeds maximum length"
 
 	// Log messages
 	SNAPSHOT_SAVED     = "Snapshot saved successfully to: %s"

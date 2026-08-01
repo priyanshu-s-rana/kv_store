@@ -4,78 +4,78 @@ import (
 	"github.com/priyanshu-s-rana/kv_store/constants"
 )
 
-type CommandsMeta struct {
-	Handler func(*Store, []string) Response
-	IsWrite bool
+type commandsMeta struct {
+	handler func(*Store, []string) Response
+	isWrite bool
 }
 
-var Registry = map[constants.CmdName]CommandsMeta{
+var registry = map[constants.CmdName]commandsMeta{
 	constants.Ping: {
-		Handler: (*Store).ping,
-		IsWrite: false,
+		handler: (*Store).ping,
+		isWrite: false,
 	},
 	constants.Get: {
-		Handler: (*Store).get,
-		IsWrite: false,
+		handler: (*Store).get,
+		isWrite: false,
 	},
 	constants.Set: {
-		Handler: (*Store).set,
-		IsWrite: true,
+		handler: (*Store).set,
+		isWrite: true,
 	},
 	constants.Del: {
-		Handler: (*Store).del,
-		IsWrite: true,
+		handler: (*Store).del,
+		isWrite: true,
 	},
-	constants.Expire: {
-		Handler: (*Store).expire,
-		IsWrite: true,
+	constants.PExpireAt: {
+		handler: (*Store).pexpireAt,
+		isWrite: true,
 	},
 	constants.TTL: {
-		Handler: (*Store).ttl,
-		IsWrite: false,
+		handler: (*Store).ttl,
+		isWrite: false,
 	},
 	constants.Publish: {
-		Handler: (*Store).publish,
-		IsWrite: false,
+		handler: (*Store).publish,
+		isWrite: false,
 	},
 	constants.Keys: {
-		Handler: (*Store).keys,
-		IsWrite: false,
+		handler: (*Store).keys,
+		isWrite: false,
 	},
 	constants.FlushAll: {
-		Handler: (*Store).flushAll,
-		IsWrite: true,
+		handler: (*Store).flushAll,
+		isWrite: true,
 	},
 	constants.MemoryStats: {
-		Handler: (*Store).memoryStats,
-		IsWrite: false,
+		handler: (*Store).memoryStats,
+		isWrite: false,
 	},
 	constants.Mget: {
-		Handler: (*Store).mget,
-		IsWrite: false,
+		handler: (*Store).mget,
+		isWrite: false,
 	},
 	constants.Mset: {
-		Handler: (*Store).mset,
-		IsWrite: true,
+		handler: (*Store).mset,
+		isWrite: true,
 	},
 	constants.Incr: {
-		Handler: (*Store).incr,
-		IsWrite: true,
+		handler: (*Store).incr,
+		isWrite: true,
 	},
 	constants.Decr: {
-		Handler: (*Store).decr,
-		IsWrite: true,
+		handler: (*Store).decr,
+		isWrite: true,
 	},
 	constants.EVICT: {
-		Handler: (*Store).evict,
-		IsWrite: false,
+		handler: (*Store).evict,
+		isWrite: false,
 	},
 	constants.Checkpoint: {
-		Handler: (*Store).checkpoint,
-		IsWrite: false,
+		handler: (*Store).checkpoint,
+		isWrite: false,
 	},
 	constants.Rebaseline: {
-		Handler: (*Store).rebaseline,
-		IsWrite: false,
+		handler: (*Store).rebaseline,
+		isWrite: false,
 	},
 }
