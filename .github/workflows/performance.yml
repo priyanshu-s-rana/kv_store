@@ -34,9 +34,25 @@ jobs:
     # the header comment above) — generous but bounded so a hung
     # container/benchmark doesn't burn runner time indefinitely.
     timeout-minutes: 120
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Verify clean checkout
+        run: |
+          echo "HEAD: $(git rev-parse HEAD)"
+          echo "Branch: $(git branch --show-current)"
+          echo
+          git status --short
+          echo
+
+          if [[ -n "$(git status --porcelain)" ]]; then
+            echo "::error::GitHub Actions checkout is unexpectedly dirty."
+            git status --short
+            git diff --stat
+            exit 1
+          fi
 
       - name: Setup Go
         id: setup-go
@@ -45,19 +61,27 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      # redis_benchmark.sh and startup_recovery_benchmark.sh both hard-
-      # require redis-benchmark (see each script's check_dependency /
-      # dependency loop) — not preinstalled on GitHub-hosted runners.
-      # memtier_benchmark is deliberately NOT installed here: it has no
-      # apt package and building it from source is a heavy, brittle add
-      # for a CI runner; memtier_benchmark.sh already exits 0 and skips
-      # the macro suite gracefully when the binary is missing (see the
-      # script), which is exactly what will happen below — surfaced in the
-      # dashboard as "Memtier: ⏭️ Skipped", not a failure.
-      - name: Install redis-benchmark
+      # redis-benchmark and memtier_benchmark are required by the
+      # benchmark suites. redis-benchmark is available from Ubuntu's
+      # redis-tools package; memtier_benchmark is installed from Redis'
+      # official APT repository.
+      - name: Install benchmark tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y redis-tools
+          sudo apt-get install -y redis-tools lsb-release curl gpg
+
+          curl -fsSL https://packages.redis.io/gpg \
+            | sudo gpg --dearmor \
+            -o /usr/share/keyrings/redis-archive-keyring.gpg
+
+          echo "deb [signed-by=/usr/share/keyrings/redis-archive-keyring.gpg] https://packages.redis.io/deb $(lsb_release -cs) main" \
+            | sudo tee /etc/apt/sources.list.d/redis.list
+
+          sudo apt-get update
+          sudo apt-get install -y memtier-benchmark
+
+          redis-benchmark --version
+          memtier_benchmark --version
 
       - name: Record start time
         run: echo "START_TIME=$(date +%s)" >> "$GITHUB_ENV"
@@ -65,6 +89,27 @@ jobs:
       - name: Run unit tests
         id: unit_tests
         run: go test ./...
+
+      # Unit tests should not modify the repository. If they do, fail here
+      # rather than allowing the benchmark to be associated with a dirty
+      # working tree.
+      - name: Verify benchmark checkout
+        run: |
+          echo "Git state before benchmark:"
+          git status --short
+          echo
+
+          if [[ -n "$(git status --porcelain)" ]]; then
+            echo "::error::Working tree became dirty before benchmark execution."
+            echo
+            echo "Changed files:"
+            git status --short
+            echo
+            echo "Diff:"
+            git diff --stat
+            git diff
+            exit 1
+          fi
 
       # bench-all's own Makefile recipe always computes its own fresh
       # RUN_ID internally (see Makefile) rather than honoring one from the
@@ -80,10 +125,12 @@ jobs:
         continue-on-error: true
         run: |
           set -o pipefail
+
           ARGS=""
           if [[ "${{ inputs.quick }}" == "true" ]]; then
             ARGS="--quick"
           fi
+
           make bench-all NAME="$RUN_NAME" ARGS="$ARGS" 2>&1 | tee bench-all.log
 
       - name: Locate run directory
@@ -122,9 +169,7 @@ jobs:
             redis_status="failure"
             grep -q '^Benchmark completed\.$' "$log" && redis_status="success"
 
-            # Macro (memtier) — three distinct outcomes, see the install
-            # step's comment for why "skipped" is an expected, not a
-            # failed, result on these runners today.
+            # Macro (memtier)
             memtier_status="failure"
             if grep -q 'not found — skipping macro suite\.' "$log"; then
               memtier_status="skipped"
@@ -132,11 +177,7 @@ jobs:
               memtier_status="success"
             fi
 
-            # Startup/recovery — the script always reaches its final
-            # message regardless of individual scenario failures (see
-            # startup_recovery_benchmark.sh); per-scenario detail is in
-            # its own summary.csv table further down, not collapsed into
-            # this single dashboard row.
+            # Startup/recovery
             startup_status="failure"
             grep -q '^Startup/recovery benchmark completed\.$' "$log" && startup_status="success"
 
@@ -147,8 +188,11 @@ jobs:
 
           end_time=$(date +%s)
           elapsed=$(( end_time - START_TIME ))
+
           doc_url="https://github.com/${{ github.repository }}/blob/${{ github.sha }}/docs/benchmarks/runtime.md"
+
           machine="${{ runner.os }} / ${{ runner.arch }}"
+
           if [[ -n "${OUT_DIR:-}" && -f "${OUT_DIR}/benchmark_info.txt" ]]; then
             cpu_line=$(grep '^CPU:' "${OUT_DIR}/benchmark_info.txt" || true)
             [[ -n "$cpu_line" ]] && machine="${cpu_line#CPU: } (${{ runner.os }}/${{ runner.arch }})"
@@ -191,7 +235,10 @@ jobs:
               echo "Metrics: \`ns/op\` ↓ · \`B/op\` ↓ · \`allocs/op\` ↓ — see [docs/benchmarks/runtime.md](${doc_url})."
               echo ""
             } >> "$GITHUB_STEP_SUMMARY"
-            .github/scripts/csv_to_markdown.sh "${OUT_DIR}/runtime/benchmem_summary.csv" >> "$GITHUB_STEP_SUMMARY"
+
+            .github/scripts/csv_to_markdown.sh \
+              "${OUT_DIR}/runtime/benchmem_summary.csv" \
+              >> "$GITHUB_STEP_SUMMARY"
 
             {
               echo ""
@@ -200,8 +247,11 @@ jobs:
               echo "First 20 rows of the core sweep (median values); the full sweep — every concurrency level plus the payload/keyspace/batch/pipeline dimensions, and the mean/stddev columns behind each median — is in the uploaded artifact's \`summary.csv\`:"
               echo ""
             } >> "$GITHUB_STEP_SUMMARY"
+
             # +2 for the header/separator rows csv_to_markdown.sh emits.
-            .github/scripts/csv_to_markdown.sh "${OUT_DIR}/summary.csv" "Command,Concurrency,rps,p50,P99,OpsSec" \
+            .github/scripts/csv_to_markdown.sh \
+              "${OUT_DIR}/summary.csv" \
+              "Command,Concurrency,rps,p50,P99,OpsSec" \
               | head -22 >> "$GITHUB_STEP_SUMMARY"
 
             {
@@ -209,14 +259,24 @@ jobs:
               echo "## Memtier"
               echo ""
             } >> "$GITHUB_STEP_SUMMARY"
-            .github/scripts/csv_to_markdown.sh "${OUT_DIR}/macro/summary.csv" >> "$GITHUB_STEP_SUMMARY"
+
+            if [[ -s "${OUT_DIR}/macro/summary.csv" ]]; then
+              .github/scripts/csv_to_markdown.sh \
+                "${OUT_DIR}/macro/summary.csv" \
+                >> "$GITHUB_STEP_SUMMARY"
+            else
+              echo "_No memtier summary was produced._" >> "$GITHUB_STEP_SUMMARY"
+            fi
 
             {
               echo ""
               echo "## Startup / Recovery"
               echo ""
             } >> "$GITHUB_STEP_SUMMARY"
-            .github/scripts/csv_to_markdown.sh "${OUT_DIR}/startup_recovery/summary.csv" >> "$GITHUB_STEP_SUMMARY"
+
+            .github/scripts/csv_to_markdown.sh \
+              "${OUT_DIR}/startup_recovery/summary.csv" \
+              >> "$GITHUB_STEP_SUMMARY"
           fi
 
           {
@@ -226,8 +286,10 @@ jobs:
             echo "Download from this run's **Artifacts** section (bottom of the run summary page):"
             echo "- \`performance-log-${{ github.run_id }}\` — combined bench-all output log"
           } >> "$GITHUB_STEP_SUMMARY"
+
           if [[ -n "${OUT_DIR:-}" ]]; then
-            echo "- \`performance-benchmarks-${{ github.run_id }}\` — the full run directory (all summary.csv files, raw redis-benchmark/memtier output, metrics snapshots)" >> "$GITHUB_STEP_SUMMARY"
+            echo "- \`performance-benchmarks-${{ github.run_id }}\` — the full run directory (all summary.csv files, raw redis-benchmark/memtier output, metrics snapshots)" \
+              >> "$GITHUB_STEP_SUMMARY"
           fi
 
           # The combined bench-all step used continue-on-error so this
