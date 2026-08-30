@@ -1,3 +1,5 @@
+name: Performance
+
 # The project's automated full benchmark run: the complete suite
 # (redis-benchmark micro, memtier macro, startup/recovery, Go runtime
 # benchmarks) via `make bench-all` — see benchmarks/README.md. Deliberately
